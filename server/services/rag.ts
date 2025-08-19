@@ -41,13 +41,21 @@ class RAGService {
         embeddingFunction: null // ✅ Tell Chroma we’re handling embeddings ourselves
       });
       console.log("RAG service initialized successfully");
+      chromaAvailable = true;
     } catch (error) {
       console.error("RAG service initialization error:", error);
-      throw error;
+      console.log("⚠️ ChromaDB not available - RAG features will be disabled");
+      chromaAvailable = false;
+      // Don't throw - allow app to continue without vector storage
     }
   }
 
   async ingestDocument(options: DocumentIngestOptions): Promise<any> {
+    if (!chromaAvailable) {
+      console.log("⚠️ ChromaDB not available - document ingestion disabled");
+      throw new Error("Vector database not available. Please try again later.");
+    }
+    
     try {
       const { file, userId, title, tags = [] } = options;
       
@@ -135,6 +143,21 @@ class RAGService {
     topK?: number;
     filters?: Record<string, any>;
   }): Promise<RAGQueryResult> {
+    if (!chromaAvailable) {
+      // Fallback to direct AI response without RAG
+      const directAnswer = await aiService.generateCybersecurityResponse(
+        options.query,
+        "ChromaDB not available - providing direct AI response",
+        []
+      );
+      
+      return {
+        answer: directAnswer.content,
+        sources: [],
+        confidence: 0.5 // Lower confidence without RAG context
+      };
+    }
+    
     try {
       const { query, topK = 5, filters = {} } = options;
 
