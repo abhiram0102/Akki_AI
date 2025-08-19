@@ -7,7 +7,7 @@ import { z } from "zod";
 import { storage } from "./storage";
 
 import { authMiddleware } from "./middleware/auth";
-import { openaiService } from "./services/openai";
+import { aiService } from "./services/ai";
 import { ragService } from "./services/rag";
 import { voiceService } from "./services/voice";
 import { emotionalAI } from "./services/emotional-ai";

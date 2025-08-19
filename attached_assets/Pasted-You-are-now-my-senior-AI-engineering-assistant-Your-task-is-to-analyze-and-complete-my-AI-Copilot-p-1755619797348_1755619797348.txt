@@ -1,0 +1,63 @@
+You are now my senior AI engineering assistant. Your task is to analyze and complete my AI Copilot project (codename: AMMU AI), which is a Red Team / Cybersecurity AI agent platform. 
+
+The project is built with:
+- Backend: Node.js, Express, TypeScript
+- Frontend: Next.js + React + ShadCN/UI + Wouter
+- Database: PostgreSQL or ChromaDB for RAG (vector database)
+- AI Core: Google Gemini API (not OpenAI)
+
+### Current State
+- The base project structure is ready.
+- Pages like Login, Dashboard, Coding, Red Team, OSINT, and Reports exist but are incomplete or not fully functional.
+- Voice recognition and memory systems are partially implemented.
+- RAG service initializes but embeddings need Gemini support.
+- Navigation and layout are working.
+
+### Your Mission
+1. **Analyze existing code**:
+   - Identify where OpenAI is still referenced and replace with Gemini (`@google/generative-ai`).
+   - Ensure `.env` uses `GEMINI_API_KEY`.
+
+2. **Implement AI Workspace Pages**:
+   - **Coding**: AI-powered coding assistant (debugging, secure code review, exploit PoC generation).
+   - **Red Team**: AI-driven attacker simulation, payload generation, phishing campaign simulations, exploit chain planning.
+   - **OSINT**: AI workflows for reconnaissance (domain enumeration, metadata extraction, Shodan queries, GitHub leaks).
+   - **Reports**: Automated cybersecurity report generation (executive summary, vulnerabilities found, MITRE ATT&CK mapping, recommendations).
+
+3. **RAG Integration**:
+   - Use ChromaDB with Gemini embeddings.
+   - Allow uploading PDFs/Markdown logs/screenshots → extract, embed, and make searchable for context in answers.
+
+4. **Advanced Features**:
+   - Real-time memory system (user sessions with context).
+   - Emotional Bond tracker (already partially built, expand it to influence conversation tone).
+   - Voice input/output using Gemini + Google Speech API.
+   - Multi-agent workflows (one agent for recon, one for exploit, one for reporting, all orchestrated).
+
+5. **UI Enhancements**:
+   - Build clean UI components with ShadCN (cards, tables, tabs).
+   - Make dashboards interactive with charts (Recharts).
+   - Add dark/light mode toggle.
+
+6. **Final Output**:
+   - A fully working Red Team AI platform with AI Copilot (Ammu) that:
+     - Responds via Gemini.
+     - Assists cybersecurity learners and professionals.
+     - Provides actionable insights and automated pentesting workflows.
+     - Generates professional-grade reports.
+
+### Deliverables
+- Complete Next.js frontend with all pages functional.
+- Complete Express backend with Gemini integration.
+- Replace OpenAI calls with Gemini.
+- Ensure project runs with `pnpm dev`.
+- Document `.env` config, setup steps, and usage guide.
+
+### Rules
+- Always provide complete code snippets when updating files.
+- Follow TypeScript best practices.
+- Keep responses concise but actionable.
+- Assume role of **project lead AI engineer**—don’t ask me questions, just implement and explain.
+- At the end, summarize what you changed.
+
+Now analyze the current codebase (server + client) and generate the **next set of complete implementations** to move this project forward.

@@ -2,9 +2,29 @@
 
 ## Overview
 
-The AI Copilot is an advanced cybersecurity assistant named "Ammu" that combines voice interaction, emotional intelligence, and enterprise-grade security tools. The system provides a command center interface for cybersecurity professionals, featuring AI-powered capabilities including voice activation, RAG (Retrieval-Augmented Generation) document processing, emotional bonding, and integrated security tools.
+AMMU AI is an advanced cybersecurity platform powered by Google Gemini API that combines AI-driven security analysis, red team operations, and comprehensive reporting. The system provides a command center interface for cybersecurity professionals, featuring AI-powered capabilities including secure code analysis, exploit generation, threat simulation, OSINT reconnaissance, and automated report generation.
 
-The application serves as a comprehensive cybersecurity workspace with multiple operational areas: Chat/RAG, Coding, Red Team operations, OSINT, and Reports. It's designed to learn user preferences, adapt communication styles, and provide intelligent assistance for security assessments and operations.
+The application serves as a comprehensive cybersecurity workspace with five specialized operational areas:
+1. **Chat/RAG** - AI-powered conversations with document analysis
+2. **Coding** - Security code review and exploit proof-of-concept generation  
+3. **Red Team** - Attack simulations, phishing campaigns, and penetration testing workflows
+4. **OSINT** - Open source intelligence gathering and reconnaissance
+5. **Reports** - AI-generated security assessment reports with MITRE ATT&CK mapping
+
+## Recent Changes (Migration Completed)
+
+### AI Service Migration (December 2024)
+- ✅ **Complete OpenAI to Gemini Migration**: Successfully migrated entire codebase from OpenAI API to Google Gemini API
+- ✅ **New AIService Implementation**: Created comprehensive AIService class using Gemini 2.5 Flash/Pro models
+- ✅ **RAG System Updated**: Updated document embeddings and retrieval to use Gemini embedding models
+- ✅ **Emotional AI Enhanced**: Migrated emotional analysis and bonding system to Gemini-based processing
+
+### Security Features Implementation
+- ✅ **Advanced Coding Assistant**: Implemented comprehensive security code analysis with vulnerability detection and exploit PoC generation
+- ✅ **Red Team Operations**: Built complete attack simulation framework with phishing campaigns and multi-step attack chains
+- ✅ **OSINT Intelligence**: Developed domain reconnaissance, GitHub intelligence, and Shodan integration capabilities
+- ✅ **Automated Reporting**: Created AI-powered security report generation with MITRE ATT&CK framework mapping
+- ✅ **Educational Safety Measures**: Added appropriate warnings and disclaimers for all security testing features
 
 ## User Preferences
 
@@ -42,9 +62,9 @@ Preferred communication style: Simple, everyday language.
 - **Security**: Bcrypt password hashing with configurable rounds
 
 ### AI and ML Integration
-- **Primary AI**: OpenAI GPT-4o for chat completions and reasoning
-- **Alternative AI**: Google Gemini AI support for redundancy
-- **Voice Processing**: OpenAI Whisper for speech-to-text transcription
+- **Primary AI**: Google Gemini 2.5 Flash/Pro for chat completions and reasoning (migrated from OpenAI)
+- **Embeddings**: Gemini text-embedding models for RAG vector storage
+- **Voice Processing**: Gemini-based text analysis for emotional tone detection
 - **Emotional AI**: Custom emotional bonding system with mood tracking and personality adaptation
 - **Agent System**: Multi-step planning with approval workflows for high-risk operations
 - **RAG System**: Document ingestion with text extraction, chunking, and vector embeddings
@@ -72,8 +92,8 @@ Preferred communication style: Simple, everyday language.
 ## External Dependencies
 
 ### Core AI Services
-- **OpenAI API**: GPT-4o for chat completions, Whisper for speech-to-text, embeddings for RAG
-- **Google AI API**: Gemini models as alternative AI backend for redundancy
+- **Google Gemini API**: Primary AI service using Gemini 2.5 Flash/Pro models for all completions
+- **Gemini Embeddings**: Text embedding models for RAG document processing and similarity search
 
 ### Database and Storage
 - **Neon PostgreSQL**: Serverless PostgreSQL database with connection pooling

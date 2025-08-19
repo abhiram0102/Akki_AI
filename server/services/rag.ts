@@ -1,11 +1,14 @@
 import { ChromaClient } from "chromadb";
 import pdf from "pdf-parse";
 import { storage } from "../storage";
-import { openaiService } from "./openai";
+import { aiService } from "./ai";
 import type { InsertDocument, InsertChunk } from "@shared/schema";
 const chromaClient = new ChromaClient({
   path: process.env.CHROMA_URL || "http://localhost:8000"
 });
+
+// Flag to track if ChromaDB is available
+let chromaAvailable = false;
 
 export interface RAGQueryResult {
   answer: string;
@@ -85,7 +88,7 @@ class RAGService {
 
       // Generate embeddings and store chunks
       const chunkPromises = chunks.map(async (chunk, index) => {
-        const embedding = await openaiService.generateEmbedding(chunk.content);
+        const embedding = await aiService.generateEmbedding(chunk.content);
         
         // Store in vector database
         await this.collection.add({
@@ -136,7 +139,7 @@ class RAGService {
       const { query, topK = 5, filters = {} } = options;
 
       // Generate query embedding
-      const queryEmbedding = await openaiService.generateEmbedding(query);
+      const queryEmbedding = await aiService.generateEmbedding(query);
 
       // Search vector database
       const searchResults = await this.collection.query({
@@ -154,7 +157,7 @@ class RAGService {
       }));
 
       // Generate contextual answer using RAG
-      const contextualAnswer = await openaiService.generateCybersecurityResponse(
+      const contextualAnswer = await aiService.generateCybersecurityResponse(
         query,
         `RAG Query Context: ${sources.length} relevant sources found`,
         sources

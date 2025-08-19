@@ -1,5 +1,5 @@
 import { storage } from "../storage";
-import { openaiService } from "./openai";
+import { aiService } from "./ai";
 import type { User } from "@shared/schema";
 
 export interface EmotionalState {
@@ -94,7 +94,7 @@ class EmotionalAI {
       // Get emotional memories
       const emotionalMemories = recentMemories.filter(m => m.type === "emotional");
       
-      const personalizedResponse = await openaiService.generateEmotionalResponse(
+      const personalizedResponse = await aiService.generateEmotionalResponse(
         content,
         emotionalState,
         emotionalState.bondLevel
@@ -124,7 +124,7 @@ class EmotionalAI {
       - emotionalNeeds: emotional needs and preferences
       - bondingFactors: what helps build stronger relationships`;
 
-      const analysis = await openaiService.chatCompletion(
+      const analysis = await aiService.chatCompletion(
         [{ role: "user", content: analysisPrompt }],
         { jsonMode: true, temperature: 0.3 }
       );
