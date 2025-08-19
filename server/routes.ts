@@ -180,21 +180,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       let agentResponse;
       try {
-        // Get response from AI agent
+        // Enhanced AI agent processing with cybersecurity focus
         agentResponse = await agentService.processMessage({
-        message: data.content,
-        sessionId,
-        userId,
-        voiceInput: data.voiceInput || false
-      });
+          message: data.content,
+          sessionId,
+          userId,
+          voiceInput: data.voiceInput || false,
+          context: {
+            emotionalTone: data.emotionalTone,
+            workspace: "chat",
+            capabilities: ["multimodal", "exploits", "osint", "reports", "rag"]
+          }
+        });
       } catch (agentError) {
         console.error("Agent Service Error:", agentError);
-        // Create a user-friendly error message to send back
+        // Enhanced error handling with context
         const assistantErrorMessage = await storage.createMessage({
           sessionId,
           role: "assistant",
-          content: "I apologize, but I encountered an error while processing your request. Please try again shortly.",
-          metadata: { error: true }
+          content: `I encountered an issue processing your cybersecurity request. This might be due to:
+          
+• Network connectivity for external tools
+• API rate limits for advanced analysis
+• Complex queries requiring more context
+
+Please try rephrasing your request or provide more specific details about what you'd like me to help you with.`,
+          metadata: { 
+            error: true
+          }
         });
         return res.status(200).json({
           userMessage,
@@ -269,6 +282,119 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Voice synthesis error:", error);
       res.status(500).json({ message: error instanceof Error ? error.message : "Speech synthesis failed" });
+    }
+  });
+
+  // Advanced multi-modal cybersecurity analysis routes
+  app.post("/api/protected/analysis/multimodal", upload.array("files", 10), async (req, res) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ message: "User not authenticated" });
+      }
+      
+      const { text, context } = req.body;
+      const files = req.files as Express.Multer.File[];
+      
+      // Separate images from other files
+      const images = files?.filter(file => file.mimetype.startsWith('image/'))
+        .map(file => file.buffer) || [];
+      
+      const analysis = await aiService.analyzeMultiModalContent(
+        text || "Analyze the provided content for cybersecurity insights",
+        images.length > 0 ? images : undefined
+      );
+      
+      res.json({
+        analysis,
+        filesAnalyzed: files?.length || 0,
+        imagesAnalyzed: images.length,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error("Multi-modal analysis error:", error);
+      res.status(500).json({ message: error instanceof Error ? error.message : "Analysis failed" });
+    }
+  });
+
+  app.post("/api/protected/exploits/generate", async (req, res) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ message: "User not authenticated" });
+      }
+      
+      const { vulnerability, target, constraints } = req.body;
+      
+      if (!vulnerability || !target) {
+        return res.status(400).json({ message: "Vulnerability and target are required" });
+      }
+      
+      const exploit = await aiService.generateExploitPoC(vulnerability, target, constraints);
+      
+      // Log the exploit generation for audit purposes
+      console.log(`Exploit PoC generated for user ${(req.user as any).id}: ${vulnerability}`);
+      
+      res.json({
+        exploit,
+        timestamp: new Date().toISOString(),
+        warnings: [
+          "This is for educational and authorized testing only",
+          "Ensure you have proper authorization before testing",
+          "Use only in controlled environments"
+        ]
+      });
+    } catch (error) {
+      console.error("Exploit generation error:", error);
+      res.status(500).json({ message: error instanceof Error ? error.message : "Exploit generation failed" });
+    }
+  });
+
+  app.post("/api/protected/osint/strategy", async (req, res) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ message: "User not authenticated" });
+      }
+      
+      const { target, objectives, constraints } = req.body;
+      
+      if (!target || !objectives || !Array.isArray(objectives)) {
+        return res.status(400).json({ message: "Target and objectives array are required" });
+      }
+      
+      const strategy = await aiService.generateOSINTStrategy(target, objectives, constraints);
+      
+      res.json({
+        strategy,
+        timestamp: new Date().toISOString(),
+        disclaimer: "Ensure all reconnaissance activities are authorized and legal"
+      });
+    } catch (error) {
+      console.error("OSINT strategy error:", error);
+      res.status(500).json({ message: error instanceof Error ? error.message : "Strategy generation failed" });
+    }
+  });
+
+  app.post("/api/protected/reports/generate", async (req, res) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ message: "User not authenticated" });
+      }
+      
+      const { findings, executiveSummary, scope } = req.body;
+      
+      if (!findings || !Array.isArray(findings)) {
+        return res.status(400).json({ message: "Findings array is required" });
+      }
+      
+      const report = await aiService.generatePentestReport(findings, executiveSummary, scope);
+      
+      res.json({
+        report,
+        timestamp: new Date().toISOString(),
+        downloadUrl: `/api/protected/reports/download/${Date.now()}` // Would implement actual file serving
+      });
+    } catch (error) {
+      console.error("Report generation error:", error);
+      res.status(500).json({ message: error instanceof Error ? error.message : "Report generation failed" });
     }
   });
 

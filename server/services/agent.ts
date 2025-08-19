@@ -44,6 +44,11 @@ export interface MessageContext {
   userId: string;
   voiceInput?: boolean;
   previousMessages?: any[];
+  context?: {
+    emotionalTone?: string;
+    workspace?: string;
+    capabilities?: string[];
+  };
 }
 
 class AgentService {
