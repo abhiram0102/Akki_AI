@@ -479,6 +479,644 @@ app.put("/api/protected/profile", async (req, res) => {
   }
 });
 
+// Coding workspace routes
+app.post("/api/coding/analyze", async (req, res) => {
+  try {
+    const { code, language } = req.body;
+    
+    const analysisPrompt = `You are a cybersecurity expert performing code security analysis. Analyze the following ${language} code for vulnerabilities, security issues, and provide recommendations.
+
+Code to analyze:
+\`\`\`${language}
+${code}
+\`\`\`
+
+Provide your analysis in the following JSON format:
+{
+  "vulnerabilities": [
+    {
+      "type": "SQL Injection",
+      "severity": "high",
+      "description": "User input not properly sanitized before database query",
+      "line": 15,
+      "suggestion": "Use parameterized queries or prepared statements"
+    }
+  ],
+  "securityScore": 65,
+  "mitreTags": ["T1059", "T1055"],
+  "exploitPotential": "SQL injection could allow data extraction or modification",
+  "recommendations": ["Input validation", "Parameterized queries", "Least privilege access"]
+}`;
+
+    const analysis = await aiService.chatCompletion(
+      [{ role: "user", content: analysisPrompt }],
+      { jsonMode: true, temperature: 0.3 }
+    );
+
+    const parsedAnalysis = JSON.parse(analysis);
+    
+    res.json({
+      id: Date.now().toString(),
+      code,
+      language,
+      ...parsedAnalysis,
+      createdAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error("Code analysis error:", error);
+    res.status(500).json({ message: error instanceof Error ? error.message : "Analysis failed" });
+  }
+});
+
+app.post("/api/coding/generate-exploit", async (req, res) => {
+  try {
+    const { code, exploitType, language } = req.body;
+    
+    const exploitPrompt = `You are an ethical security researcher creating educational proof-of-concept exploits. Generate a ${exploitType} exploit for the following ${language} code.
+
+Target code:
+\`\`\`${language}
+${code}
+\`\`\`
+
+IMPORTANT: This is for educational purposes and authorized testing only.
+
+Provide your exploit in the following JSON format:
+{
+  "payload": "' OR 1=1 --",
+  "description": "SQL injection payload that bypasses authentication by making the WHERE clause always true",
+  "mitreTechnique": "T1190",
+  "riskLevel": "high",
+  "preventions": ["Input validation", "Parameterized queries", "WAF implementation"],
+  "educational_note": "This exploit should only be used in authorized penetration testing environments"
+}`;
+
+    const exploit = await aiService.chatCompletion(
+      [{ role: "user", content: exploitPrompt }],
+      { jsonMode: true, temperature: 0.4 }
+    );
+
+    const parsedExploit = JSON.parse(exploit);
+    
+    res.json({
+      id: Date.now().toString(),
+      targetCode: code,
+      exploitType,
+      ...parsedExploit,
+      createdAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error("Exploit generation error:", error);
+    res.status(500).json({ message: error instanceof Error ? error.message : "Generation failed" });
+  }
+});
+
+// Red Team workspace routes
+app.post("/api/redteam/simulations", async (req, res) => {
+  try {
+    const { target, attackType, name } = req.body;
+    
+    const simulationPrompt = `You are a red team specialist planning an attack simulation. Create a realistic attack simulation plan for:
+
+Target: ${target}
+Attack Type: ${attackType}
+Simulation Name: ${name}
+
+Provide your simulation plan in the following JSON format:
+{
+  "phase": "reconnaissance",
+  "progress": 25,
+  "findings": [
+    {
+      "type": "Open Port Discovery",
+      "severity": "medium",
+      "description": "Multiple open ports discovered on target system",
+      "mitreTechnique": "T1046"
+    }
+  ],
+  "status": "active",
+  "steps": ["Network scanning", "Service enumeration", "Vulnerability assessment"]
+}
+
+IMPORTANT: This is for authorized testing and educational purposes only.`;
+
+    const simulation = await aiService.chatCompletion(
+      [{ role: "user", content: simulationPrompt }],
+      { jsonMode: true, temperature: 0.4 }
+    );
+
+    const parsedSimulation = JSON.parse(simulation);
+    
+    res.json({
+      id: Date.now().toString(),
+      name,
+      target,
+      attackType,
+      ...parsedSimulation,
+      createdAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error("Simulation creation error:", error);
+    res.status(500).json({ message: error instanceof Error ? error.message : "Creation failed" });
+  }
+});
+
+app.post("/api/redteam/campaigns", async (req, res) => {
+  try {
+    const { name, template, targets } = req.body;
+    
+    const campaignPrompt = `You are creating an educational phishing campaign for security awareness training.
+
+Campaign: ${name}
+Template: ${template}
+Target Count: ${targets.length}
+
+Generate a realistic phishing campaign plan in JSON format:
+{
+  "template": "Dear {{name}}, Your account requires immediate verification. Click here to secure your account: {{malicious_link}}",
+  "targetList": ${JSON.stringify(targets.slice(0, 3))},
+  "sendsCompleted": 0,
+  "opensTracked": 0,
+  "clicksTracked": 0,
+  "credentialsHarvested": 0,
+  "status": "draft",
+  "educational_tips": ["Look for urgent language", "Check sender email carefully", "Verify links before clicking"],
+  "detection_methods": ["Email header analysis", "Link inspection", "Domain verification"]
+}
+
+IMPORTANT: This is for authorized security awareness training only.`;
+
+    const campaign = await aiService.chatCompletion(
+      [{ role: "user", content: campaignPrompt }],
+      { jsonMode: true, temperature: 0.4 }
+    );
+
+    const parsedCampaign = JSON.parse(campaign);
+    
+    res.json({
+      id: Date.now().toString(),
+      name,
+      ...parsedCampaign,
+      createdAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error("Campaign creation error:", error);
+    res.status(500).json({ message: error instanceof Error ? error.message : "Creation failed" });
+  }
+});
+
+app.post("/api/redteam/chains/generate", async (req, res) => {
+  try {
+    const { target, objective } = req.body;
+    
+    const chainPrompt = `You are a red team specialist creating a multi-step attack chain. Plan an attack chain for:
+
+Target: ${target}
+Objective: ${objective}
+
+Create a realistic attack chain in JSON format:
+{
+  "steps": [
+    {
+      "technique": "Initial Access - Phishing",
+      "mitreTactic": "TA0001",
+      "description": "Send targeted phishing emails to gain initial foothold",
+      "automated": false,
+      "status": "pending"
+    },
+    {
+      "technique": "Privilege Escalation",
+      "mitreTactic": "TA0004", 
+      "description": "Exploit local vulnerabilities to gain elevated privileges",
+      "automated": true,
+      "status": "pending"
+    }
+  ],
+  "currentStep": 0,
+  "overallProgress": 0,
+  "riskLevel": "high",
+  "timeline": "2-3 weeks for full chain execution",
+  "prerequisites": ["Email delivery infrastructure", "Payload development", "C2 setup"]
+}
+
+IMPORTANT: This is for authorized testing and educational purposes only.`;
+
+    const chain = await aiService.chatCompletion(
+      [{ role: "user", content: chainPrompt }],
+      { jsonMode: true, temperature: 0.4 }
+    );
+
+    const parsedChain = JSON.parse(chain);
+    
+    res.json({
+      id: Date.now().toString(),
+      name: `Attack Chain - ${target}`,
+      ...parsedChain,
+      createdAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error("Chain generation error:", error);
+    res.status(500).json({ message: error instanceof Error ? error.message : "Generation failed" });
+  }
+});
+
+// OSINT workspace routes
+app.post("/api/osint/domain", async (req, res) => {
+  try {
+    const { domain } = req.body;
+    
+    const osintPrompt = `You are an OSINT specialist performing domain reconnaissance. Analyze the domain: ${domain}
+
+Generate realistic domain intelligence in JSON format:
+{
+  "subdomains": ["www.${domain}", "mail.${domain}", "ftp.${domain}"],
+  "ipAddresses": ["203.0.113.1", "203.0.113.2"],
+  "technologies": [
+    {
+      "name": "nginx",
+      "version": "1.18.0",
+      "category": "Web Server"
+    },
+    {
+      "name": "WordPress",
+      "version": "6.0",
+      "category": "CMS"
+    }
+  ],
+  "certificates": [
+    {
+      "issuer": "Let's Encrypt Authority X3",
+      "subject": "*.${domain}",
+      "validFrom": "2024-01-01T00:00:00Z",
+      "validTo": "2024-12-31T23:59:59Z"
+    }
+  ],
+  "dnsRecords": {
+    "A": ["203.0.113.1"],
+    "MX": ["10 mail.${domain}"],
+    "NS": ["ns1.${domain}", "ns2.${domain}"]
+  },
+  "socialMedia": [
+    {
+      "platform": "Twitter",
+      "url": "https://twitter.com/${domain.split('.')[0]}",
+      "verified": false
+    }
+  ],
+  "breaches": [],
+  "riskScore": 35,
+  "reconnaissance_tips": ["Check for exposed admin panels", "Enumerate subdirectories", "Analyze certificate transparency logs"],
+  "further_analysis": ["Subdomain brute forcing", "Technology stack fingerprinting", "Social media profiling"]
+}
+
+IMPORTANT: Only perform reconnaissance on authorized targets.`;
+
+    const intelligence = await aiService.chatCompletion(
+      [{ role: "user", content: osintPrompt }],
+      { jsonMode: true, temperature: 0.3 }
+    );
+
+    const parsedIntel = JSON.parse(intelligence);
+    
+    res.json({
+      domain,
+      ...parsedIntel,
+      lastUpdated: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error("Domain OSINT error:", error);
+    res.status(500).json({ message: error instanceof Error ? error.message : "OSINT failed" });
+  }
+});
+
+app.post("/api/osint/github", async (req, res) => {
+  try {
+    const { target } = req.body;
+    
+    const githubPrompt = `You are an OSINT specialist analyzing GitHub organization: ${target}
+
+Generate realistic GitHub intelligence in JSON format:
+{
+  "organization": "${target}",
+  "repositories": [
+    {
+      "name": "web-app",
+      "description": "Main web application repository",
+      "language": "JavaScript",
+      "stars": 127,
+      "forks": 23,
+      "isPrivate": false,
+      "hasSecrets": true,
+      "vulnerabilities": [
+        {
+          "type": "Dependency vulnerability",
+          "severity": "medium",
+          "description": "Outdated package with known security issues"
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "developer-john",
+      "email": "john@${target}.com",
+      "name": "John Developer",
+      "location": "San Francisco, CA",
+      "company": "${target}"
+    }
+  ],
+  "sensitiveFiles": [
+    {
+      "repository": "web-app",
+      "filename": ".env.example",
+      "type": "config",
+      "content": "API_KEY=example_key_here"
+    }
+  ],
+  "totalRepos": 12,
+  "riskLevel": "medium",
+  "analysis_notes": ["Several repositories with potential secrets", "Active development with frequent commits"],
+  "recommendations": ["Implement secret scanning", "Review public repository contents", "Enable 2FA for all users"]
+}
+
+IMPORTANT: Only analyze authorized or public repositories.`;
+
+    const intelligence = await aiService.chatCompletion(
+      [{ role: "user", content: githubPrompt }],
+      { jsonMode: true, temperature: 0.3 }
+    );
+
+    const parsedIntel = JSON.parse(intelligence);
+    
+    res.json(parsedIntel);
+  } catch (error) {
+    console.error("GitHub OSINT error:", error);
+    res.status(500).json({ message: error instanceof Error ? error.message : "GitHub analysis failed" });
+  }
+});
+
+app.post("/api/osint/shodan", async (req, res) => {
+  try {
+    const { query } = req.body;
+    
+    const shodanPrompt = `You are an OSINT specialist using Shodan search for: ${query}
+
+Generate realistic Shodan search results in JSON format:
+{
+  "query": "${query}",
+  "results": [
+    {
+      "ip": "198.51.100.42",
+      "port": 22,
+      "protocol": "tcp",
+      "service": "ssh",
+      "banner": "SSH-2.0-OpenSSH_7.4",
+      "location": {
+        "country": "United States",
+        "city": "Los Angeles",
+        "latitude": 34.0522,
+        "longitude": -118.2437
+      },
+      "vulns": ["CVE-2018-15473"],
+      "lastSeen": "2024-01-20T15:30:00Z"
+    },
+    {
+      "ip": "198.51.100.43",
+      "port": 80,
+      "protocol": "tcp", 
+      "service": "http",
+      "banner": "Apache/2.4.41 (Ubuntu)",
+      "location": {
+        "country": "United States",
+        "city": "Denver",
+        "latitude": 39.7392,
+        "longitude": -104.9903
+      },
+      "vulns": [],
+      "lastSeen": "2024-01-19T12:15:00Z"
+    }
+  ],
+  "totalResults": 2847,
+  "countriesFound": ["United States", "Canada", "Germany", "United Kingdom"],
+  "topServices": [
+    {
+      "name": "http",
+      "count": 1204
+    },
+    {
+      "name": "ssh",
+      "count": 892
+    }
+  ],
+  "vulnerabilities": [
+    {
+      "cve": "CVE-2018-15473",
+      "count": 156,
+      "severity": "medium"
+    }
+  ],
+  "analysis_insights": ["High concentration of services in US datacenters", "Many systems running outdated software"],
+  "search_tips": ["Try narrowing by geographic region", "Filter by specific service versions", "Look for exposed admin interfaces"]
+}
+
+IMPORTANT: Only search for authorized targets and educational purposes.`;
+
+    const intelligence = await aiService.chatCompletion(
+      [{ role: "user", content: shodanPrompt }],
+      { jsonMode: true, temperature: 0.3 }
+    );
+
+    const parsedIntel = JSON.parse(intelligence);
+    
+    res.json(parsedIntel);
+  } catch (error) {
+    console.error("Shodan search error:", error);
+    res.status(500).json({ message: error instanceof Error ? error.message : "Shodan search failed" });
+  }
+});
+
+// Reports workspace routes
+app.post("/api/reports/generate", async (req, res) => {
+  try {
+    const { title, type, template, sections } = req.body;
+    
+    const reportPrompt = `You are a cybersecurity analyst generating a professional ${type} security report.
+
+Report Title: ${title}
+Report Type: ${type}
+Custom Sections: ${sections ? sections.join(', ') : 'Standard sections'}
+
+Generate a comprehensive security report in JSON format:
+{
+  "title": "${title}",
+  "type": "${type}",
+  "status": "completed",
+  "progress": 100,
+  "findings": [
+    {
+      "id": "finding-001",
+      "title": "Weak SSH Configuration",
+      "severity": "high",
+      "category": "Configuration",
+      "description": "SSH service allows password authentication and root login",
+      "recommendation": "Disable password authentication and root login, use key-based authentication",
+      "mitreTechnique": "T1110",
+      "cvss": 7.5
+    },
+    {
+      "id": "finding-002", 
+      "title": "Outdated Web Server",
+      "severity": "medium",
+      "category": "Patch Management",
+      "description": "Web server running outdated version with known vulnerabilities",
+      "recommendation": "Update to latest stable version and establish patch management process",
+      "mitreTechnique": "T1190",
+      "cvss": 6.1
+    }
+  ],
+  "summary": {
+    "totalFindings": 8,
+    "criticalCount": 1,
+    "highCount": 2,
+    "mediumCount": 3,
+    "lowCount": 2,
+    "overallRisk": "high"
+  },
+  "mitreMapping": [
+    {
+      "tactic": "Initial Access",
+      "techniques": ["T1110", "T1190", "T1078"]
+    },
+    {
+      "tactic": "Persistence", 
+      "techniques": ["T1053", "T1543"]
+    }
+  ],
+  "recommendations": [
+    "Implement multi-factor authentication across all systems",
+    "Establish regular security patching schedule",
+    "Deploy network segmentation and monitoring",
+    "Conduct regular security awareness training",
+    "Implement endpoint detection and response (EDR)"
+  ],
+  "executiveSummary": "This security assessment identified significant vulnerabilities that pose substantial risk to the organization. Immediate attention is required for critical and high-severity findings, particularly around access controls and patch management. The overall security posture requires improvement through implementation of the provided recommendations.",
+  "technicalDetails": "The assessment utilized industry-standard penetration testing methodologies including network scanning, vulnerability assessment, and manual testing. Key findings include weak authentication mechanisms, outdated software components, and insufficient logging capabilities. Detailed remediation steps are provided for each finding.",
+  "methodology": "External and internal network penetration testing following OWASP and NIST guidelines",
+  "scope": "All internet-facing systems and internal network infrastructure within the 192.168.1.0/24 subnet"
+}`;
+
+    const report = await aiService.chatCompletion(
+      [{ role: "user", content: reportPrompt }],
+      { jsonMode: true, temperature: 0.3 }
+    );
+
+    const parsedReport = JSON.parse(report);
+    
+    res.json({
+      id: Date.now().toString(),
+      ...parsedReport,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error("Report generation error:", error);
+    res.status(500).json({ message: error instanceof Error ? error.message : "Report generation failed" });
+  }
+});
+
+app.get("/api/reports/:reportId/download", async (req, res) => {
+  try {
+    const { reportId } = req.params;
+    
+    // In production, fetch report from database and generate PDF
+    const samplePDF = Buffer.from("Sample PDF content - would be actual PDF in production");
+    
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="security-report-${reportId}.pdf"`);
+    res.send(samplePDF);
+  } catch (error) {
+    console.error("Report download error:", error);
+    res.status(500).json({ message: error instanceof Error ? error.message : "Download failed" });
+  }
+});
+
+app.get("/api/reports/templates", async (req, res) => {
+  res.json([
+    {
+      id: "pentest-template",
+      name: "Penetration Test Report", 
+      type: "technical",
+      description: "Comprehensive penetration testing report template",
+      sections: ["Executive Summary", "Methodology", "Findings", "Recommendations"],
+      customizable: true
+    },
+    {
+      id: "compliance-template",
+      name: "Compliance Assessment",
+      type: "compliance", 
+      description: "Regulatory compliance assessment template",
+      sections: ["Compliance Status", "Gaps", "Remediation Plan"],
+      customizable: true
+    }
+  ]);
+});
+
+app.get("/api/findings", async (req, res) => {
+  res.json([
+    {
+      title: "Weak Password Policy",
+      severity: "medium",
+      category: "Authentication",
+      description: "Password complexity requirements are insufficient",
+      mitreTechnique: "T1110"
+    },
+    {
+      title: "Unencrypted Data Transmission", 
+      severity: "high",
+      category: "Encryption",
+      description: "Sensitive data transmitted without encryption",
+      mitreTechnique: "T1040"
+    }
+  ]);
+});
+
+// Missing route stubs for data retrieval
+app.get("/api/coding/analyses", async (req, res) => {
+  res.json([]); // Return empty for now - in production, fetch from database
+});
+
+app.get("/api/coding/exploits", async (req, res) => {
+  res.json([]); // Return empty for now - in production, fetch from database
+});
+
+app.get("/api/redteam/simulations", async (req, res) => {
+  res.json([]); // Return empty for now - in production, fetch from database
+});
+
+app.get("/api/redteam/campaigns", async (req, res) => {
+  res.json([]); // Return empty for now - in production, fetch from database
+});
+
+app.get("/api/redteam/chains", async (req, res) => {
+  res.json([]); // Return empty for now - in production, fetch from database
+});
+
+app.get("/api/osint/domain/recent", async (req, res) => {
+  res.json([]); // Return empty for now - in production, fetch from database
+});
+
+app.get("/api/osint/github/recent", async (req, res) => {
+  res.json([]); // Return empty for now - in production, fetch from database
+});
+
+app.get("/api/osint/shodan/recent", async (req, res) => {
+  res.json([]); // Return empty for now - in production, fetch from database
+});
+
+app.get("/api/reports", async (req, res) => {
+  res.json([]); // Return empty for now - in production, fetch from database
+});
+
 // Health check
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
