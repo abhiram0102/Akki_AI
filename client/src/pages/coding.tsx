@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -6,11 +6,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
-import { Code, Bug, Shield, Zap, AlertTriangle, CheckCircle } from "lucide-react";
-import { apiRequest } from "@/lib/queryClient";
+import { Code, Bug, Shield, Zap, AlertTriangle } from "lucide-react";
+import { apiRequest, queryClient as qc } from "@/lib/queryClient";
 
 interface CodeAnalysis {
   id: string;
@@ -51,40 +50,34 @@ export default function CodingPage() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  // Fetch recent code analyses
-  const { data: analyses, isLoading: analysesLoading } = useQuery({
+  const { data: analyses, isLoading: analysesLoading } = useQuery<CodeAnalysis[]>({
     queryKey: ["/api/coding/analyses"],
-    enabled: true,
   });
 
-  // Fetch recent exploit generations
-  const { data: exploits, isLoading: exploitsLoading } = useQuery({
+  const { data: exploits, isLoading: exploitsLoading } = useQuery<ExploitGeneration[]>({
     queryKey: ["/api/coding/exploits"],
-    enabled: true,
   });
 
-  // Code analysis mutation
   const analyzeCodeMutation = useMutation({
     mutationFn: (data: { code: string; language: string }) =>
-      apiRequest("/api/coding/analyze", { method: "POST", body: data }),
+      apiRequest("POST", "/api/coding/analyze", data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/coding/analyses"] });
       toast({ title: "Code analysis completed", description: "Security vulnerabilities have been identified" });
     },
-    onError: (error) => {
+    onError: (error: Error) => {
       toast({ title: "Analysis failed", description: error.message, variant: "destructive" });
     },
   });
 
-  // Exploit generation mutation
   const generateExploitMutation = useMutation({
     mutationFn: (data: { code: string; exploitType: string; language: string }) =>
-      apiRequest("/api/coding/generate-exploit", { method: "POST", body: data }),
+      apiRequest("POST", "/api/coding/generate-exploit", data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/coding/exploits"] });
       toast({ title: "Exploit generated", description: "Proof of concept has been created" });
     },
-    onError: (error) => {
+    onError: (error: Error) => {
       toast({ title: "Generation failed", description: error.message, variant: "destructive" });
     },
   });
@@ -137,16 +130,13 @@ export default function CodingPage() {
       <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1">
         <TabsList className="grid w-full grid-cols-3">
           <TabsTrigger value="analysis" data-testid="tab-analysis">
-            <Shield className="h-4 w-4 mr-2" />
-            Security Analysis
+            <Shield className="h-4 w-4 mr-2" />Security Analysis
           </TabsTrigger>
           <TabsTrigger value="exploits" data-testid="tab-exploits">
-            <Zap className="h-4 w-4 mr-2" />
-            Exploit Generation
+            <Zap className="h-4 w-4 mr-2" />Exploit Generation
           </TabsTrigger>
           <TabsTrigger value="history" data-testid="tab-history">
-            <Bug className="h-4 w-4 mr-2" />
-            Analysis History
+            <Bug className="h-4 w-4 mr-2" />Analysis History
           </TabsTrigger>
         </TabsList>
 
@@ -154,19 +144,13 @@ export default function CodingPage() {
           <Card>
             <CardHeader>
               <CardTitle>Code Security Analysis</CardTitle>
-              <CardDescription>
-                AI-powered security analysis to identify vulnerabilities and provide secure coding recommendations
-              </CardDescription>
+              <CardDescription>AI-powered security analysis to identify vulnerabilities</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
                 <label className="text-sm font-medium text-white">Programming Language</label>
-                <select
-                  value={language}
-                  onChange={(e) => setLanguage(e.target.value)}
-                  className="w-full p-2 rounded bg-slate-800 border border-slate-600 text-white"
-                  data-testid="select-language"
-                >
+                <select value={language} onChange={(e) => setLanguage(e.target.value)}
+                  className="w-full p-2 rounded bg-slate-800 border border-slate-600 text-white" data-testid="select-language">
                   <option value="javascript">JavaScript</option>
                   <option value="python">Python</option>
                   <option value="java">Java</option>
@@ -177,20 +161,12 @@ export default function CodingPage() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-white">Code to Analyze</label>
-                <Textarea
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
+                <Textarea value={code} onChange={(e) => setCode(e.target.value)}
                   placeholder="Paste your code here for security analysis..."
-                  className="min-h-[300px] font-mono text-sm bg-slate-900 border-slate-600"
-                  data-testid="textarea-code"
-                />
+                  className="min-h-[300px] font-mono text-sm bg-slate-900 border-slate-600" data-testid="textarea-code" />
               </div>
-              <Button
-                onClick={handleAnalyzeCode}
-                disabled={analyzeCodeMutation.isPending}
-                className="w-full bg-cyber-blue hover:bg-cyber-blue/80"
-                data-testid="button-analyze"
-              >
+              <Button onClick={handleAnalyzeCode} disabled={analyzeCodeMutation.isPending}
+                className="w-full bg-cyber-blue hover:bg-cyber-blue/80" data-testid="button-analyze">
                 {analyzeCodeMutation.isPending ? "Analyzing..." : "Analyze Security"}
               </Button>
             </CardContent>
@@ -201,25 +177,17 @@ export default function CodingPage() {
           <Card>
             <CardHeader>
               <CardTitle>Exploit PoC Generation</CardTitle>
-              <CardDescription>
-                Generate educational proof-of-concept exploits for learning and testing purposes
-              </CardDescription>
+              <CardDescription>Generate educational proof-of-concept exploits for authorized testing</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <Alert>
                 <AlertTriangle className="h-4 w-4" />
-                <AlertDescription>
-                  Generated exploits are for educational and authorized testing only. Misuse is prohibited.
-                </AlertDescription>
+                <AlertDescription>Generated exploits are for educational and authorized testing only. Misuse is prohibited.</AlertDescription>
               </Alert>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-white">Exploit Type</label>
-                <select
-                  value={exploitType}
-                  onChange={(e) => setExploitType(e.target.value)}
-                  className="w-full p-2 rounded bg-slate-800 border border-slate-600 text-white"
-                  data-testid="select-exploit-type"
-                >
+                <select value={exploitType} onChange={(e) => setExploitType(e.target.value)}
+                  className="w-full p-2 rounded bg-slate-800 border border-slate-600 text-white" data-testid="select-exploit-type">
                   <option value="injection">SQL/NoSQL Injection</option>
                   <option value="xss">Cross-Site Scripting (XSS)</option>
                   <option value="csrf">Cross-Site Request Forgery</option>
@@ -230,20 +198,12 @@ export default function CodingPage() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-white">Target Code</label>
-                <Textarea
-                  value={exploitTarget}
-                  onChange={(e) => setExploitTarget(e.target.value)}
+                <Textarea value={exploitTarget} onChange={(e) => setExploitTarget(e.target.value)}
                   placeholder="Paste vulnerable code to generate exploit PoC..."
-                  className="min-h-[200px] font-mono text-sm bg-slate-900 border-slate-600"
-                  data-testid="textarea-exploit-target"
-                />
+                  className="min-h-[200px] font-mono text-sm bg-slate-900 border-slate-600" data-testid="textarea-exploit-target" />
               </div>
-              <Button
-                onClick={handleGenerateExploit}
-                disabled={generateExploitMutation.isPending}
-                className="w-full bg-cyber-red hover:bg-cyber-red/80"
-                data-testid="button-generate-exploit"
-              >
+              <Button onClick={handleGenerateExploit} disabled={generateExploitMutation.isPending}
+                className="w-full bg-cyber-red hover:bg-cyber-red/80" data-testid="button-generate-exploit">
                 {generateExploitMutation.isPending ? "Generating..." : "Generate Exploit PoC"}
               </Button>
             </CardContent>
@@ -253,34 +213,23 @@ export default function CodingPage() {
         <TabsContent value="history" className="flex-1 space-y-4">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <Card>
-              <CardHeader>
-                <CardTitle>Recent Analyses</CardTitle>
-              </CardHeader>
+              <CardHeader><CardTitle>Recent Analyses</CardTitle></CardHeader>
               <CardContent>
                 <ScrollArea className="h-[400px]">
                   {analysesLoading ? (
                     <div className="text-center py-4 text-slate-400">Loading analyses...</div>
-                  ) : analyses?.length ? (
+                  ) : Array.isArray(analyses) && analyses.length ? (
                     <div className="space-y-4">
-                      {analyses.map((analysis: CodeAnalysis) => (
+                      {analyses.map((analysis) => (
                         <div key={analysis.id} className="border border-slate-600 rounded p-4 space-y-2">
                           <div className="flex items-center justify-between">
                             <Badge variant="outline">{analysis.language}</Badge>
-                            <span className="text-sm text-slate-400">
-                              Score: {analysis.securityScore}/100
-                            </span>
+                            <span className="text-sm text-slate-400">Score: {analysis.securityScore}/100</span>
                           </div>
-                          <div className="text-sm text-slate-300">
-                            {analysis.vulnerabilities.length} vulnerabilities found
-                          </div>
+                          <div className="text-sm text-slate-300">{analysis.vulnerabilities?.length || 0} vulnerabilities found</div>
                           <div className="flex flex-wrap gap-1">
-                            {analysis.vulnerabilities.slice(0, 3).map((vuln, index) => (
-                              <Badge
-                                key={index}
-                                className={`text-xs ${getSeverityColor(vuln.severity)}`}
-                              >
-                                {vuln.type}
-                              </Badge>
+                            {analysis.vulnerabilities?.slice(0, 3).map((vuln, index) => (
+                              <Badge key={index} className={`text-xs ${getSeverityColor(vuln.severity)}`}>{vuln.type}</Badge>
                             ))}
                           </div>
                         </div>
@@ -294,27 +243,23 @@ export default function CodingPage() {
             </Card>
 
             <Card>
-              <CardHeader>
-                <CardTitle>Recent Exploits</CardTitle>
-              </CardHeader>
+              <CardHeader><CardTitle>Recent Exploits</CardTitle></CardHeader>
               <CardContent>
                 <ScrollArea className="h-[400px]">
                   {exploitsLoading ? (
                     <div className="text-center py-4 text-slate-400">Loading exploits...</div>
-                  ) : exploits?.length ? (
+                  ) : Array.isArray(exploits) && exploits.length ? (
                     <div className="space-y-4">
-                      {exploits.map((exploit: ExploitGeneration) => (
+                      {exploits.map((exploit) => (
                         <div key={exploit.id} className="border border-slate-600 rounded p-4 space-y-2">
                           <div className="flex items-center justify-between">
                             <Badge variant="outline">{exploit.exploitType}</Badge>
                             <span className={`text-sm font-medium ${getRiskColor(exploit.riskLevel)}`}>
-                              {exploit.riskLevel.toUpperCase()}
+                              {exploit.riskLevel?.toUpperCase()}
                             </span>
                           </div>
                           <div className="text-sm text-slate-300">{exploit.description}</div>
-                          <div className="text-xs text-slate-400">
-                            MITRE: {exploit.mitreTechnique}
-                          </div>
+                          <div className="text-xs text-slate-400">MITRE: {exploit.mitreTechnique}</div>
                         </div>
                       ))}
                     </div>

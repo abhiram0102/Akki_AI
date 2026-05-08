@@ -45,10 +45,14 @@ class ApiClient {
     return this.request(endpoint, { method: 'GET' });
   }
 
-  async post(endpoint: string, data?: any) {
+  async post(endpoint: string, data?: any, config?: { headers?: Record<string, string> }) {
+    const isFormData = typeof FormData !== "undefined" && data instanceof FormData;
     return this.request(endpoint, {
       method: 'POST',
-      body: data ? JSON.stringify(data) : undefined,
+      body: isFormData ? data : (data ? JSON.stringify(data) : undefined),
+      headers: isFormData
+        ? { ...(config?.headers || {}) }
+        : { 'Content-Type': 'application/json', ...(config?.headers || {}) },
     });
   }
 

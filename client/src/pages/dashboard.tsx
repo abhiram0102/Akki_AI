@@ -4,11 +4,15 @@ import { useAuth } from "@/lib/auth";
 import NavigationRail from "@/components/layout/navigation-rail";
 import MainContent from "@/components/layout/main-content";
 import ContextPanel from "@/components/layout/context-panel";
-
 import CommandPalette from "@/components/ui/command-palette";
 import { useVoice } from "@/hooks/use-voice";
 
-function ClientOnlyDashboard({ audioContext, setAudioContext }) {
+interface ClientDashboardProps {
+  audioContext: AudioContext | null;
+  setAudioContext: (ctx: AudioContext | null) => void;
+}
+
+function ClientOnlyDashboard({ audioContext, setAudioContext }: ClientDashboardProps) {
   const { user, isLoading } = useAuth();
   const [, setLocation] = useLocation();
   const { initializeVoice, wakeWordDetected } = useVoice(audioContext);
@@ -17,22 +21,19 @@ function ClientOnlyDashboard({ audioContext, setAudioContext }) {
     if (!isLoading && !user) {
       setLocation("/login");
     } else if (!isLoading && user && audioContext) {
-      // Initialize voice only after AudioContext is explicitly enabled
       initializeVoice();
     }
   }, [user, isLoading, audioContext, setLocation, initializeVoice]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.metaKey && e.key === 'u') {
-        // Trigger file upload
+      if (e.metaKey && e.key === "u") {
         const uploadButton = document.querySelector('[data-testid="button-upload"]') as HTMLButtonElement;
         uploadButton?.click();
       }
     };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
   const handleInitAudio = () => {
@@ -43,7 +44,7 @@ function ClientOnlyDashboard({ audioContext, setAudioContext }) {
       ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
       win.__audioContext = ctx;
     }
-    if (ctx.state === 'suspended') {
+    if (ctx.state === "suspended") {
       ctx.resume?.().catch(() => {});
     }
     setAudioContext(ctx);
@@ -69,7 +70,6 @@ function ClientOnlyDashboard({ audioContext, setAudioContext }) {
         <MainContent onInitAudio={handleInitAudio} audioInitialized={!!audioContext} audioContext={audioContext} />
         <ContextPanel />
       </div>
-
       <CommandPalette />
     </div>
   );
