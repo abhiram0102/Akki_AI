@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, update
 
 from backend.database import get_db, init_db
-from backend.models import User, Session, Message, Document, Memory, ToolRun, Finding, VoiceInteraction
+from backend.models import User, Session, Message, Document, Memory, ToolRun, Finding, VoiceInteraction, WorkspaceRecord
 from backend.auth import hash_password, verify_password, create_access_token, get_current_user
 from backend.services.ai_service import ai_service
 from backend.services.agent_service import agent_service
@@ -158,6 +158,75 @@ def message_to_dict(m: Message) -> dict:
         "metadata": m.metadata_ or {},
         "createdAt": m.created_at.isoformat() if m.created_at else None,
     }
+
+
+def workspace_record_to_dict(r: WorkspaceRecord) -> dict:
+    return {"id": r.id, "createdAt": r.created_at.isoformat() if r.created_at else None, **r.data}
+
+
+async def _save_workspace(
+    db: AsyncSession,
+    workspace: str,
+    record_type: str,
+    title: str,
+    data: dict,
+    user_id: str | None = None,
+) -> WorkspaceRecord:
+    rec = WorkspaceRecord(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        workspace=workspace,
+        record_type=record_type,
+        title=title,
+        data=data,
+    )
+    db.add(rec)
+    await db.commit()
+    await db.refresh(rec)
+    return rec
+
+
+async def _get_workspace_records(
+    db: AsyncSession,
+    workspace: str,
+    record_type: str,
+    user_id: str | None = None,
+    limit: int = 50,
+) -> list[WorkspaceRecord]:
+    q = select(WorkspaceRecord).where(
+        WorkspaceRecord.workspace == workspace,
+        WorkspaceRecord.record_type == record_type,
+    )
+    if user_id:
+        q = q.where(WorkspaceRecord.user_id == user_id)
+    q = q.order_by(desc(WorkspaceRecord.created_at)).limit(limit)
+    result = await db.execute(q)
+    return list(result.scalars().all())
+
+
+# Optional auth — tries to decode bearer token but never raises if absent
+from fastapi.security import HTTPBearer as _HTTPBearer
+from jose import JWTError as _JWTError
+
+_optional_bearer = _HTTPBearer(auto_error=False)
+
+
+async def optional_current_user(
+    credentials=Depends(_optional_bearer),
+    db: AsyncSession = Depends(get_db),
+) -> User | None:
+    if not credentials:
+        return None
+    try:
+        from backend.auth import decode_token
+        payload = decode_token(credentials.credentials)
+        user_id = payload.get("userId")
+        if not user_id:
+            return None
+        result = await db.execute(select(User).where(User.id == user_id))
+        return result.scalar_one_or_none()
+    except Exception:
+        return None
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -407,6 +476,7 @@ async def get_memory(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # user_id maps to DB column "owner_id" via SQLAlchemy column mapping
     q = select(Memory).where(Memory.user_id == current_user.id)
     if type:
         q = q.where(Memory.type == type)
@@ -587,191 +657,442 @@ async def rag_query(request: Request, current_user: User = Depends(get_current_u
 # ── Coding workspace ──────────────────────────────────────────────────────────
 
 @app.post("/api/coding/analyze")
-async def analyze_code(body: CodeAnalysisRequest):
+async def analyze_code(
+    body: CodeAnalysisRequest,
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     try:
         analysis = await ai_service.analyze_code(body.code, body.language)
-        return {
-            "id": str(int(datetime.now().timestamp() * 1000)),
+        now = datetime.now(timezone.utc).isoformat()
+        data = {
             "code": body.code,
             "language": body.language,
             **analysis,
-            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "createdAt": now,
         }
+        rec = await _save_workspace(
+            db, "coding", "analysis",
+            title=f"{body.language.upper()} Analysis",
+            data=data,
+            user_id=current_user.id if current_user else None,
+        )
+        return {"id": rec.id, **data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/coding/generate-exploit")
-async def generate_exploit(body: ExploitGenerationRequest):
+async def generate_exploit(
+    body: ExploitGenerationRequest,
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     try:
         exploit = await ai_service.generate_exploit(body.code, body.exploitType, body.language)
-        return {
-            "id": str(int(datetime.now().timestamp() * 1000)),
+        now = datetime.now(timezone.utc).isoformat()
+        data = {
             "targetCode": body.code,
             "exploitType": body.exploitType,
+            "language": body.language,
             **exploit,
-            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "createdAt": now,
         }
+        rec = await _save_workspace(
+            db, "coding", "exploit",
+            title=f"{body.exploitType} Exploit",
+            data=data,
+            user_id=current_user.id if current_user else None,
+        )
+        return {"id": rec.id, **data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/coding/analyses")
-async def get_analyses():
-    return []
+async def get_analyses(
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    records = await _get_workspace_records(
+        db, "coding", "analysis",
+        user_id=current_user.id if current_user else None,
+    )
+    return [workspace_record_to_dict(r) for r in records]
 
 
 @app.get("/api/coding/exploits")
-async def get_exploits():
-    return []
+async def get_exploits(
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    records = await _get_workspace_records(
+        db, "coding", "exploit",
+        user_id=current_user.id if current_user else None,
+    )
+    return [workspace_record_to_dict(r) for r in records]
 
 
 # ── Red Team workspace ────────────────────────────────────────────────────────
 
 @app.post("/api/redteam/simulations")
-async def create_simulation(body: SimulationRequest):
+async def create_simulation(
+    body: SimulationRequest,
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     try:
-        prompt = f"""You are a red team specialist. Create a realistic attack simulation plan.
-Target: {body.target}, Attack Type: {body.attackType}, Name: {body.name}
-Return JSON: {{"phase": "reconnaissance", "progress": 25, "findings": [{{"type": "Open Port", "severity": "medium", "description": "...", "mitreTechnique": "T1046"}}], "status": "active", "steps": ["Network scanning"]}}
-IMPORTANT: Authorized testing only."""
+        prompt = f"""You are a red team specialist. Create a detailed, realistic attack simulation plan for authorized penetration testing.
+Target: {body.target}
+Attack Type: {body.attackType}
+Simulation Name: {body.name}
+
+Return valid JSON with this structure (no markdown, no code fences):
+{{"phase": "reconnaissance", "progress": 15, "status": "active",
+"findings": [
+  {{"type": "Attack Vector", "severity": "high", "description": "Detailed finding description", "mitreTechnique": "T1595"}},
+  {{"type": "Exposed Service", "severity": "medium", "description": "Another finding", "mitreTechnique": "T1046"}}
+],
+"steps": ["Phase 1: Reconnaissance - passive information gathering", "Phase 2: Scanning - active port/service detection", "Phase 3: Exploitation - target the identified weaknesses", "Phase 4: Post-Exploitation - maintain access and pivot"],
+"riskLevel": "high",
+"estimatedDuration": "3-5 days",
+"prerequisites": ["Written authorization", "Isolated test environment"]}}
+
+IMPORTANT: This simulation is for authorized security testing only."""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.4)
         parsed = json.loads(result)
-        return {"id": str(int(datetime.now().timestamp() * 1000)), "name": body.name, "target": body.target, "attackType": body.attackType, **parsed, "createdAt": datetime.now(timezone.utc).isoformat()}
+        now = datetime.now(timezone.utc).isoformat()
+        data = {"name": body.name, "target": body.target, "attackType": body.attackType, **parsed, "createdAt": now}
+        rec = await _save_workspace(
+            db, "redteam", "simulation",
+            title=body.name,
+            data=data,
+            user_id=current_user.id if current_user else None,
+        )
+        return {"id": rec.id, **data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/redteam/campaigns")
-async def create_campaign(body: CampaignRequest):
+async def create_campaign(
+    body: CampaignRequest,
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     try:
-        prompt = f"""Create an educational phishing campaign for security awareness training.
-Campaign: {body.name}, Template: {body.template[:200]}, Targets: {len(body.targets)}
-Return JSON: {{"template": "...", "targetList": {json.dumps(body.targets[:3])}, "sendsCompleted": 0, "opensTracked": 0, "clicksTracked": 0, "credentialsHarvested": 0, "status": "draft", "educational_tips": ["Check sender carefully"]}}"""
+        prompt = f"""Create a detailed educational phishing campaign for security awareness training.
+Campaign Name: {body.name}
+Email Template Base: {body.template[:300]}
+Number of Targets: {len(body.targets)}
+
+Return valid JSON (no markdown):
+{{"template": "Full polished phishing email template here...", "subject": "Urgent: Account Verification Required",
+"targetList": {json.dumps(body.targets[:5])},
+"sendsCompleted": 0, "opensTracked": 0, "clicksTracked": 0, "credentialsHarvested": 0, "status": "draft",
+"educational_tips": ["Always verify the sender domain", "Check for spelling errors in URLs", "Never enter credentials from email links", "Report suspicious emails to IT security"],
+"indicators_of_phishing": ["Urgency language", "Mismatched sender domain", "Generic greeting", "Suspicious link destination"]}}"""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.4)
         parsed = json.loads(result)
-        return {"id": str(int(datetime.now().timestamp() * 1000)), "name": body.name, **parsed, "createdAt": datetime.now(timezone.utc).isoformat()}
+        now = datetime.now(timezone.utc).isoformat()
+        data = {"name": body.name, **parsed, "createdAt": now}
+        rec = await _save_workspace(
+            db, "redteam", "campaign",
+            title=body.name,
+            data=data,
+            user_id=current_user.id if current_user else None,
+        )
+        return {"id": rec.id, **data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/redteam/chains/generate")
-async def generate_chain(body: ChainGenerationRequest):
+async def generate_chain(
+    body: ChainGenerationRequest,
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     try:
-        prompt = f"""Create a multi-step attack chain for authorized testing.
-Target: {body.target}, Objective: {body.objective}
-Return JSON: {{"steps": [{{"technique": "Initial Access - Phishing", "mitreTactic": "TA0001", "description": "...", "automated": false, "status": "pending"}}], "currentStep": 0, "overallProgress": 0, "riskLevel": "high", "timeline": "2-3 weeks"}}"""
+        prompt = f"""Create a detailed multi-step attack chain for authorized penetration testing.
+Target: {body.target}
+Objective: {body.objective}
+
+Return valid JSON (no markdown):
+{{"steps": [
+  {{"technique": "Initial Access - Spearphishing", "mitreTactic": "TA0001", "mitreTechnique": "T1566", "description": "Craft targeted spearphishing email to gain initial foothold", "automated": false, "status": "pending", "expectedDuration": "1-2 days"}},
+  {{"technique": "Execution - PowerShell", "mitreTactic": "TA0002", "mitreTechnique": "T1059.001", "description": "Execute malicious PowerShell script to establish persistence", "automated": true, "status": "pending", "expectedDuration": "30 minutes"}},
+  {{"technique": "Privilege Escalation", "mitreTactic": "TA0004", "mitreTechnique": "T1068", "description": "Exploit local vulnerability for SYSTEM privileges", "automated": false, "status": "pending", "expectedDuration": "2-4 hours"}},
+  {{"technique": "Lateral Movement - Pass-the-Hash", "mitreTactic": "TA0008", "mitreTechnique": "T1550.002", "description": "Use harvested NTLM hashes to move laterally", "automated": true, "status": "pending", "expectedDuration": "1 day"}}
+],
+"currentStep": 0, "overallProgress": 0,
+"riskLevel": "critical", "timeline": "1-2 weeks",
+"mitigations": ["Network segmentation", "Privileged access workstations", "MFA enforcement", "EDR solutions"]}}"""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.4)
         parsed = json.loads(result)
-        return {"id": str(int(datetime.now().timestamp() * 1000)), "name": f"Attack Chain - {body.target}", **parsed, "createdAt": datetime.now(timezone.utc).isoformat()}
+        name = f"Attack Chain - {body.target}"
+        now = datetime.now(timezone.utc).isoformat()
+        data = {"name": name, "target": body.target, "objective": body.objective, **parsed, "createdAt": now}
+        rec = await _save_workspace(
+            db, "redteam", "chain",
+            title=name,
+            data=data,
+            user_id=current_user.id if current_user else None,
+        )
+        return {"id": rec.id, **data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/redteam/simulations")
-async def get_simulations():
-    return []
+async def get_simulations(
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    records = await _get_workspace_records(
+        db, "redteam", "simulation",
+        user_id=current_user.id if current_user else None,
+    )
+    return [workspace_record_to_dict(r) for r in records]
 
 
 @app.get("/api/redteam/campaigns")
-async def get_campaigns():
-    return []
+async def get_campaigns(
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    records = await _get_workspace_records(
+        db, "redteam", "campaign",
+        user_id=current_user.id if current_user else None,
+    )
+    return [workspace_record_to_dict(r) for r in records]
 
 
 @app.get("/api/redteam/chains")
-async def get_chains():
-    return []
+async def get_chains(
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    records = await _get_workspace_records(
+        db, "redteam", "chain",
+        user_id=current_user.id if current_user else None,
+    )
+    return [workspace_record_to_dict(r) for r in records]
 
 
 # ── OSINT workspace ───────────────────────────────────────────────────────────
 
 @app.post("/api/osint/domain")
-async def osint_domain(body: DomainOSINTRequest):
+async def osint_domain(
+    body: DomainOSINTRequest,
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     try:
         d = body.domain
-        prompt = f"""You are an OSINT specialist. Analyze domain: {d}
-Generate realistic domain intelligence JSON:
-{{"subdomains": ["www.{d}", "mail.{d}"], "ipAddresses": ["203.0.113.1"], "technologies": [{{"name": "nginx", "version": "1.18.0", "category": "Web Server"}}], "certificates": [{{"issuer": "Let's Encrypt", "subject": "*.{d}", "validFrom": "2024-01-01T00:00:00Z", "validTo": "2024-12-31T23:59:59Z"}}], "dnsRecords": {{"A": ["203.0.113.1"], "MX": ["10 mail.{d}"]}}, "socialMedia": [{{"platform": "Twitter", "url": "https://twitter.com/{d.split('.')[0]}", "verified": false}}], "breaches": [], "riskScore": 35}}
-Authorized targets only."""
+        prompt = f"""You are an OSINT specialist conducting authorized domain intelligence gathering.
+Analyze domain: {d}
+
+Return comprehensive domain intelligence as valid JSON (no markdown, no code fences):
+{{"subdomains": ["www.{d}", "mail.{d}", "api.{d}", "dev.{d}", "staging.{d}"],
+"ipAddresses": ["203.0.113.10", "203.0.113.11"],
+"technologies": [
+  {{"name": "nginx", "version": "1.24.0", "category": "Web Server"}},
+  {{"name": "CloudFlare", "version": null, "category": "CDN/WAF"}},
+  {{"name": "React", "version": "18.x", "category": "Frontend Framework"}}
+],
+"certificates": [{{"issuer": "Let's Encrypt Authority X3", "subject": "*.{d}", "validFrom": "2024-01-01T00:00:00Z", "validTo": "2024-12-31T23:59:59Z", "sans": ["*.{d}", "{d}"]}}],
+"dnsRecords": {{"A": ["203.0.113.10"], "MX": ["10 mail.{d}", "20 mail2.{d}"], "TXT": ["v=spf1 include:_spf.google.com ~all"], "NS": ["ns1.{d}", "ns2.{d}"]}},
+"socialMedia": [{{"platform": "LinkedIn", "url": "https://linkedin.com/company/{d.split('.')[0]}", "verified": false}}, {{"platform": "Twitter", "url": "https://twitter.com/{d.split('.')[0]}", "verified": false}}],
+"whois": {{"registrar": "GoDaddy.com, LLC", "registrationDate": "2015-03-22", "expirationDate": "2026-03-22", "privacyProtected": true}},
+"breaches": [],
+"openPorts": [80, 443, 22],
+"riskScore": 42,
+"riskFactors": ["Outdated TLS version on port 443", "Subdomain enumeration possible", "SPF record allows too broad a range"]}}
+
+Note: This is simulated OSINT for authorized security research."""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.3)
         parsed = json.loads(result)
-        return {"domain": d, **parsed, "lastUpdated": datetime.now(timezone.utc).isoformat()}
+        now = datetime.now(timezone.utc).isoformat()
+        data = {"domain": d, **parsed, "lastUpdated": now}
+        rec = await _save_workspace(
+            db, "osint", "domain",
+            title=d,
+            data=data,
+            user_id=current_user.id if current_user else None,
+        )
+        return {"id": rec.id, **data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/osint/github")
-async def osint_github(body: GitHubOSINTRequest):
+async def osint_github(
+    body: GitHubOSINTRequest,
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     try:
         t = body.target
-        prompt = f"""OSINT analysis of GitHub org: {t}
-Return JSON: {{"organization": "{t}", "repositories": [{{"name": "web-app", "description": "Main app", "language": "JavaScript", "stars": 127, "forks": 23, "isPrivate": false, "hasSecrets": true, "vulnerabilities": [{{"type": "Dependency vulnerability", "severity": "medium", "description": "Outdated package"}}]}}], "users": [{{"username": "dev-{t}", "email": "dev@{t}.com", "name": "Developer"}}], "sensitiveFiles": [{{"repository": "web-app", "filename": ".env.example", "type": "config", "content": "API_KEY=example"}}], "totalRepos": 12, "riskLevel": "medium"}}
-Authorized targets only."""
+        prompt = f"""Perform authorized OSINT analysis of GitHub organization or user: {t}
+
+Return comprehensive GitHub intelligence as valid JSON (no markdown):
+{{"organization": "{t}",
+"repositories": [
+  {{"name": "web-app", "description": "Main web application", "language": "JavaScript", "stars": 127, "forks": 23, "isPrivate": false, "hasSecrets": true, "lastCommit": "2024-01-15", "vulnerabilities": [{{"type": "Dependency vulnerability", "severity": "high", "description": "Outdated lodash with prototype pollution", "cve": "CVE-2021-23337"}}]}},
+  {{"name": "infrastructure", "description": "IaC and deployment configs", "language": "HCL", "stars": 8, "forks": 2, "isPrivate": false, "hasSecrets": true, "lastCommit": "2024-01-10", "vulnerabilities": []}}
+],
+"users": [
+  {{"username": "admin-{t}", "email": "admin@{t}.io", "name": "Organization Admin", "publicRepos": 12, "followers": 45, "company": "{t}"}},
+  {{"username": "dev1-{t}", "email": "dev1@{t}.io", "name": "Developer 1", "publicRepos": 34, "followers": 12, "company": "{t}"}}
+],
+"sensitiveFiles": [
+  {{"repository": "web-app", "filename": ".env.example", "type": "environment config", "content": "DATABASE_URL=postgres://...\nAPI_KEY=sk-..."}},
+  {{"repository": "infrastructure", "filename": "terraform.tfvars.example", "type": "infrastructure config", "content": "aws_access_key_id = ..."}}
+],
+"totalRepos": 18, "totalMembers": 7,
+"riskLevel": "medium",
+"riskFactors": ["Hardcoded secrets in history", "Outdated dependencies", "Public repository exposes configuration"]}}"""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.3)
-        return json.loads(result)
+        parsed = json.loads(result)
+        now = datetime.now(timezone.utc).isoformat()
+        data = {**parsed, "target": t, "lastUpdated": now}
+        rec = await _save_workspace(
+            db, "osint", "github",
+            title=t,
+            data=data,
+            user_id=current_user.id if current_user else None,
+        )
+        return {"id": rec.id, **data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/osint/shodan")
-async def osint_shodan(body: ShodanRequest):
+async def osint_shodan(
+    body: ShodanRequest,
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     try:
         q = body.query
-        prompt = f"""Shodan-like search for: {q}
-Return JSON: {{"query": "{q}", "results": [{{"ip": "198.51.100.42", "port": 22, "protocol": "tcp", "service": "ssh", "banner": "SSH-2.0-OpenSSH_7.4", "location": {{"country": "United States", "city": "Los Angeles", "latitude": 34.05, "longitude": -118.24}}, "vulns": ["CVE-2018-15473"], "lastSeen": "2024-01-20T15:30:00Z"}}], "totalResults": 2847, "countriesFound": ["United States", "Germany"], "topServices": [{{"name": "http", "count": 1204}}], "vulnerabilities": [{{"cve": "CVE-2018-15473", "count": 156, "severity": "medium"}}]}}"""
+        prompt = f"""Simulate a Shodan internet exposure analysis for the query: {q}
+
+Return comprehensive exposure intelligence as valid JSON (no markdown):
+{{"query": "{q}",
+"results": [
+  {{"ip": "198.51.100.42", "hostname": "srv1.example.com", "port": 22, "protocol": "tcp", "service": "ssh", "banner": "SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.5", "location": {{"country": "United States", "city": "Los Angeles", "latitude": 34.05, "longitude": -118.24}}, "vulns": ["CVE-2023-48795"], "lastSeen": "2024-01-20T15:30:00Z", "org": "AS13335 Cloudflare Inc"}},
+  {{"ip": "198.51.100.55", "hostname": "web.example.org", "port": 443, "protocol": "tcp", "service": "https", "banner": "HTTP/1.1 200 OK Server: Apache/2.4.41", "location": {{"country": "Germany", "city": "Frankfurt", "latitude": 50.11, "longitude": 8.68}}, "vulns": [], "lastSeen": "2024-01-21T08:15:00Z", "org": "AS24940 Hetzner Online GmbH"}}
+],
+"totalResults": 3247,
+"countriesFound": ["United States", "Germany", "Netherlands", "Singapore", "United Kingdom"],
+"topServices": [{{"name": "http", "count": 1204}}, {{"name": "https", "count": 998}}, {{"name": "ssh", "count": 645}}, {{"name": "ftp", "count": 122}}],
+"vulnerabilities": [{{"cve": "CVE-2023-48795", "count": 156, "severity": "medium", "description": "Terrapin SSH protocol downgrade"}}, {{"cve": "CVE-2021-44228", "count": 42, "severity": "critical", "description": "Log4Shell remote code execution"}}],
+"exposureScore": 67}}"""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.3)
-        return json.loads(result)
+        parsed = json.loads(result)
+        now = datetime.now(timezone.utc).isoformat()
+        data = {**parsed, "lastUpdated": now}
+        rec = await _save_workspace(
+            db, "osint", "shodan",
+            title=q,
+            data=data,
+            user_id=current_user.id if current_user else None,
+        )
+        return {"id": rec.id, **data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/osint/domain/recent")
-async def get_recent_domain():
-    return []
+async def get_recent_domain(
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    records = await _get_workspace_records(
+        db, "osint", "domain",
+        user_id=current_user.id if current_user else None,
+    )
+    return [workspace_record_to_dict(r) for r in records]
 
 
 @app.get("/api/osint/github/recent")
-async def get_recent_github():
-    return []
+async def get_recent_github(
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    records = await _get_workspace_records(
+        db, "osint", "github",
+        user_id=current_user.id if current_user else None,
+    )
+    return [workspace_record_to_dict(r) for r in records]
 
 
 @app.get("/api/osint/shodan/recent")
-async def get_recent_shodan():
-    return []
+async def get_recent_shodan(
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    records = await _get_workspace_records(
+        db, "osint", "shodan",
+        user_id=current_user.id if current_user else None,
+    )
+    return [workspace_record_to_dict(r) for r in records]
 
 
 # ── Reports workspace ─────────────────────────────────────────────────────────
 
 @app.post("/api/reports/generate")
-async def generate_report(body: ReportGenerationRequest):
+async def generate_report(
+    body: ReportGenerationRequest,
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     try:
-        sections_str = ", ".join(body.sections) if body.sections else "Standard sections"
-        prompt = f"""Generate a professional {body.type} security report.
-Title: {body.title}, Type: {body.type}, Sections: {sections_str}
-Return JSON:
+        sections_str = ", ".join(body.sections) if body.sections else "Executive Summary, Scope, Methodology, Findings, Recommendations"
+        prompt = f"""Generate a comprehensive professional {body.type} security assessment report.
+Title: {body.title}
+Report Type: {body.type}
+Sections Required: {sections_str}
+
+Return valid JSON (no markdown, no code fences):
 {{"title": "{body.title}", "type": "{body.type}", "status": "completed", "progress": 100,
-"findings": [{{"id": "finding-001", "title": "Weak SSH Configuration", "severity": "high", "category": "Configuration", "description": "SSH allows password authentication and root login", "recommendation": "Use key-based auth", "mitreTechnique": "T1110", "cvss": 7.5}}, {{"id": "finding-002", "title": "Outdated Web Server", "severity": "medium", "category": "Patch Management", "description": "Running outdated version", "recommendation": "Update to latest version", "mitreTechnique": "T1190", "cvss": 6.1}}],
-"summary": {{"totalFindings": 8, "criticalCount": 1, "highCount": 2, "mediumCount": 3, "lowCount": 2, "overallRisk": "high"}},
-"mitreMapping": [{{"tactic": "Initial Access", "techniques": ["T1110", "T1190"]}}, {{"tactic": "Persistence", "techniques": ["T1053"]}}],
-"recommendations": ["Implement MFA", "Regular patching", "Network segmentation"],
-"executiveSummary": "This assessment identified significant vulnerabilities requiring immediate attention.",
-"technicalDetails": "Assessment utilized penetration testing methodologies including network scanning and manual testing."}}"""
+"findings": [
+  {{"id": "finding-001", "title": "Weak SSH Configuration", "severity": "high", "category": "Configuration Management", "description": "SSH server allows password-based authentication and permits root login, creating significant attack surface for brute-force attacks.", "recommendation": "Disable password authentication, enforce key-based auth, prohibit direct root login, and implement fail2ban.", "mitreTechnique": "T1110", "cvss": 7.5, "cve": null}},
+  {{"id": "finding-002", "title": "Outdated Web Application Framework", "severity": "critical", "category": "Patch Management", "description": "The web application is running a framework version with known RCE vulnerabilities that have public exploits available.", "recommendation": "Immediately update to the latest stable version and implement a patch management policy.", "mitreTechnique": "T1190", "cvss": 9.8, "cve": "CVE-2023-XXXX"}},
+  {{"id": "finding-003", "title": "Missing HTTP Security Headers", "severity": "medium", "category": "Web Security", "description": "Critical security headers (CSP, HSTS, X-Frame-Options) are absent, exposing users to XSS, clickjacking, and man-in-the-middle attacks.", "recommendation": "Implement all recommended OWASP security headers with appropriate values.", "mitreTechnique": "T1059", "cvss": 5.3, "cve": null}},
+  {{"id": "finding-004", "title": "Excessive User Privileges", "severity": "high", "category": "Access Control", "description": "Multiple service accounts have been granted excessive permissions violating the principle of least privilege.", "recommendation": "Conduct privilege review and implement role-based access control with minimal necessary permissions.", "mitreTechnique": "T1078", "cvss": 7.2, "cve": null}}
+],
+"summary": {{"totalFindings": 12, "criticalCount": 1, "highCount": 4, "mediumCount": 5, "lowCount": 2, "infoCount": 0, "overallRisk": "high", "riskScore": 78}},
+"mitreMapping": [
+  {{"tactic": "Initial Access", "tacticId": "TA0001", "techniques": ["T1190", "T1133", "T1566"]}},
+  {{"tactic": "Privilege Escalation", "tacticId": "TA0004", "techniques": ["T1068", "T1078"]}},
+  {{"tactic": "Persistence", "tacticId": "TA0003", "techniques": ["T1053", "T1543"]}}
+],
+"recommendations": [
+  "Immediately patch all critical and high severity vulnerabilities",
+  "Implement multi-factor authentication across all systems",
+  "Establish a vulnerability management program with regular scanning",
+  "Deploy an endpoint detection and response (EDR) solution",
+  "Conduct security awareness training for all staff"
+],
+"executiveSummary": "This {body.type} security assessment identified 12 findings across the target environment, including 1 critical and 4 high severity vulnerabilities requiring immediate remediation. The overall security posture is rated HIGH risk. Immediate action is required to address the critical remote code execution vulnerability before threat actors can exploit it.",
+"technicalDetails": "Assessment methodology followed PTES (Penetration Testing Execution Standard) and OWASP Testing Guide v4.2. Testing was conducted over 5 business days with full knowledge of the target environment (gray-box approach). Tools used included Nmap, Burp Suite Professional, Metasploit, and manual analysis techniques.",
+"scope": "Web application, supporting API endpoints, network perimeter, and authentication mechanisms",
+"methodology": "Gray-box penetration test following PTES standard"}}"""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.3)
         parsed = json.loads(result)
         now = datetime.now(timezone.utc).isoformat()
-        return {"id": str(int(datetime.now().timestamp() * 1000)), **parsed, "createdAt": now, "updatedAt": now}
+        data = {**parsed, "createdAt": now, "updatedAt": now}
+        rec = await _save_workspace(
+            db, "reports", "report",
+            title=body.title,
+            data=data,
+            user_id=current_user.id if current_user else None,
+        )
+        return {"id": rec.id, **data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/reports/{report_id}/download")
-async def download_report(report_id: str):
-    pdf_content = b"%PDF-1.4 Sample Security Report - " + report_id.encode() + b"\nGenerated by AMMU AI"
-    return Response(
-        content=pdf_content,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="security-report-{report_id}.pdf"'},
-    )
 
 
 @app.get("/api/reports/templates")
@@ -783,20 +1104,188 @@ async def get_report_templates():
     ]
 
 
+@app.get("/api/reports/{report_id}/download")
+async def download_report(
+    report_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(WorkspaceRecord).where(
+            WorkspaceRecord.id == report_id,
+            WorkspaceRecord.workspace == "reports",
+        )
+    )
+    rec = result.scalar_one_or_none()
+
+    if rec:
+        data = rec.data
+        title = data.get("title", "Security Report")
+        executive_summary = data.get("executiveSummary", "")
+        technical_details = data.get("technicalDetails", "")
+        methodology = data.get("methodology", "")
+        scope = data.get("scope", "")
+        findings = data.get("findings", [])
+        recommendations = data.get("recommendations", [])
+        summary = data.get("summary", {})
+        mitre = data.get("mitreMapping", [])
+        created_at = data.get("createdAt", rec.created_at.isoformat())
+
+        lines = [
+            "=" * 70,
+            title.upper(),
+            "AMMU AI Cybersecurity Platform — Security Assessment Report",
+            "=" * 70,
+            f"Generated: {created_at}",
+            f"Report ID: {report_id}",
+            f"Report Type: {data.get('type', 'technical').upper()}",
+            "",
+            "SCOPE",
+            "-" * 40,
+            scope or "Full environment assessment",
+            "",
+            "METHODOLOGY",
+            "-" * 40,
+            methodology or "Standard penetration testing methodology",
+            "",
+            "EXECUTIVE SUMMARY",
+            "-" * 40,
+            executive_summary,
+            "",
+            "RISK SUMMARY",
+            "-" * 40,
+            f"  Overall Risk: {summary.get('overallRisk', 'N/A').upper()}",
+            f"  Risk Score:   {summary.get('riskScore', 'N/A')} / 100",
+            f"  Total Findings: {summary.get('totalFindings', len(findings))}",
+            f"    Critical: {summary.get('criticalCount', 0)}",
+            f"    High:     {summary.get('highCount', 0)}",
+            f"    Medium:   {summary.get('mediumCount', 0)}",
+            f"    Low:      {summary.get('lowCount', 0)}",
+            "",
+            "FINDINGS",
+            "-" * 40,
+        ]
+
+        for i, f in enumerate(findings, 1):
+            lines += [
+                f"[{i}] {f.get('title', 'Untitled')}",
+                f"    Severity:    {f.get('severity', 'N/A').upper()}",
+                f"    Category:    {f.get('category', 'N/A')}",
+                f"    CVSS Score:  {f.get('cvss', 'N/A')}",
+                f"    MITRE:       {f.get('mitreTechnique', 'N/A')}",
+                f"    Description: {f.get('description', '')}",
+                f"    Recommendation: {f.get('recommendation', '')}",
+                "",
+            ]
+
+        lines += [
+            "MITRE ATT&CK MAPPING",
+            "-" * 40,
+        ]
+        for m in mitre:
+            techs = ", ".join(m.get("techniques", []))
+            lines.append(f"  {m.get('tactic', '')} ({m.get('tacticId', '')}): {techs}")
+
+        lines += [
+            "",
+            "RECOMMENDATIONS",
+            "-" * 40,
+        ]
+        for i, rec_text in enumerate(recommendations, 1):
+            lines.append(f"  {i}. {rec_text}")
+
+        lines += [
+            "",
+            "TECHNICAL DETAILS",
+            "-" * 40,
+            technical_details,
+            "",
+            "=" * 70,
+            "END OF REPORT — Generated by AMMU AI Cybersecurity Platform",
+            "=" * 70,
+        ]
+        content = "\n".join(lines).encode("utf-8")
+        filename = f"security-report-{report_id[:8]}.txt"
+    else:
+        content = f"Security Report {report_id}\nGenerated by AMMU AI Cybersecurity Platform\n\nReport data not found.".encode()
+        filename = f"security-report-{report_id}.txt"
+
+    return Response(
+        content=content,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/api/reports")
-async def get_reports():
-    return []
+async def get_reports(
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    records = await _get_workspace_records(
+        db, "reports", "report",
+        user_id=current_user.id if current_user else None,
+    )
+    return [workspace_record_to_dict(r) for r in records]
 
 
 # ── Findings ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/findings")
-async def get_findings():
-    return [
-        {"title": "Weak Password Policy", "severity": "medium", "category": "Authentication", "description": "Password complexity requirements are insufficient", "mitreTechnique": "T1110"},
-        {"title": "Unencrypted Data Transmission", "severity": "high", "category": "Encryption", "description": "Sensitive data transmitted without encryption", "mitreTechnique": "T1040"},
-        {"title": "Missing Security Headers", "severity": "medium", "category": "Web Security", "description": "HTTP security headers not configured", "mitreTechnique": "T1190"},
+async def get_findings(
+    current_user: Optional[User] = Depends(optional_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # Pull findings from code analyses stored in workspace_records
+    records = await _get_workspace_records(
+        db, "coding", "analysis",
+        user_id=current_user.id if current_user else None,
+        limit=100,
+    )
+    db_findings = []
+    for rec in records:
+        data = rec.data
+        for v in data.get("vulnerabilities", []):
+            db_findings.append({
+                "id": f"{rec.id}-{v.get('id', uuid.uuid4().hex[:8])}",
+                "title": v.get("title", "Code Vulnerability"),
+                "severity": v.get("severity", "medium"),
+                "category": v.get("type", "Code Analysis"),
+                "description": v.get("description", ""),
+                "mitreTechnique": v.get("mitreTechnique", ""),
+                "recommendation": v.get("recommendation", ""),
+                "source": "code_analysis",
+                "createdAt": data.get("createdAt"),
+            })
+
+    # Also pull findings from generated reports
+    report_records = await _get_workspace_records(
+        db, "reports", "report",
+        user_id=current_user.id if current_user else None,
+        limit=20,
+    )
+    for rec in report_records:
+        for f in rec.data.get("findings", []):
+            db_findings.append({
+                "id": f.get("id", str(uuid.uuid4())),
+                "title": f.get("title", ""),
+                "severity": f.get("severity", "medium"),
+                "category": f.get("category", "Security Assessment"),
+                "description": f.get("description", ""),
+                "mitreTechnique": f.get("mitreTechnique", ""),
+                "recommendation": f.get("recommendation", ""),
+                "cvss": f.get("cvss"),
+                "source": "report",
+                "createdAt": rec.data.get("createdAt"),
+            })
+
+    # Baseline findings always shown (deduped at end)
+    baseline = [
+        {"id": "baseline-001", "title": "Weak Password Policy", "severity": "medium", "category": "Authentication", "description": "Password complexity requirements are insufficient for modern security standards", "mitreTechnique": "T1110", "source": "baseline"},
+        {"id": "baseline-002", "title": "Unencrypted Data Transmission", "severity": "high", "category": "Encryption", "description": "Sensitive data may be transmitted without encryption in some communication paths", "mitreTechnique": "T1040", "source": "baseline"},
+        {"id": "baseline-003", "title": "Missing Security Headers", "severity": "medium", "category": "Web Security", "description": "HTTP security headers not fully configured across all endpoints", "mitreTechnique": "T1190", "source": "baseline"},
     ]
+
+    return db_findings + baseline
 
 
 # ── Vite dev-server proxy (catch-all) ─────────────────────────────────────────

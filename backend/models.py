@@ -37,6 +37,7 @@ class User(Base):
     sessions: Mapped[list["Session"]] = relationship("Session", back_populates="owner", cascade="all, delete-orphan")
     documents: Mapped[list["Document"]] = relationship("Document", back_populates="owner", cascade="all, delete-orphan")
     memories: Mapped[list["Memory"]] = relationship("Memory", back_populates="user", cascade="all, delete-orphan")
+    workspace_records: Mapped[list["WorkspaceRecord"]] = relationship("WorkspaceRecord", back_populates="user", cascade="all, delete-orphan")
 
 
 class Session(Base):
@@ -105,7 +106,8 @@ class Memory(Base):
     __tablename__ = "memories"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
-    user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # Map Python attr "user_id" to DB column "owner_id" (legacy Node.js schema name)
+    user_id: Mapped[str] = mapped_column("owner_id", UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     type: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     strength: Mapped[float] = mapped_column(Float, default=1.0)
@@ -168,3 +170,21 @@ class VoiceInteraction(Base):
     wake_word_detected: Mapped[bool] = mapped_column(Boolean, default=False)
     processing_time: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WorkspaceRecord(Base):
+    """
+    Persists AI-generated results for all workspace modules (coding, redteam, osint, reports).
+    Keyed by workspace + record_type so a single table serves all modules.
+    """
+    __tablename__ = "workspace_records"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    user_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    workspace: Mapped[str] = mapped_column(Text, nullable=False)      # coding | redteam | osint | reports
+    record_type: Mapped[str] = mapped_column(Text, nullable=False)    # analysis | exploit | simulation | campaign | chain | domain | github | shodan | report
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    data: Mapped[dict] = mapped_column(JSONB, nullable=False, default={})
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    user: Mapped["User | None"] = relationship("User", back_populates="workspace_records")
