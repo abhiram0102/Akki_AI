@@ -47,6 +47,10 @@ async def get_db():
 
 
 async def init_db():
-    from backend import models  # noqa: F401 — ensure all models are registered
+    # Import all models explicitly so SQLAlchemy registers them before create_all
+    from backend.models import (  # noqa: F401
+        User, Session, Message, Document, Chunk, Memory,
+        ToolRun, Finding, VoiceInteraction, WorkspaceRecord,
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

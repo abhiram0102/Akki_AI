@@ -10,6 +10,11 @@ FLASH_MODEL = "gemini-2.0-flash"
 PRO_MODEL = "gemini-2.0-flash"
 
 
+class AIQuotaError(Exception):
+    """Raised when the Gemini API quota / rate limit is exceeded."""
+    pass
+
+
 class AIService:
     async def chat_completion(
         self,
@@ -35,12 +40,18 @@ class AIService:
             response_mime_type="application/json" if json_mode else "text/plain",
         )
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=config,
-        )
-        return response.text
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=config,
+            )
+            return response.text
+        except Exception as e:
+            err = str(e)
+            if "RESOURCE_EXHAUSTED" in err or "429" in err or "quota" in err.lower() or "rate" in err.lower():
+                raise AIQuotaError(f"Gemini API quota exceeded: {err[:200]}")
+            raise
 
     async def analyze_code(self, code: str, language: str) -> dict:
         prompt = f"""You are a cybersecurity expert. Analyze this {language} code for security vulnerabilities.

@@ -15,7 +15,7 @@ from sqlalchemy import select, desc, update
 from backend.database import get_db, init_db
 from backend.models import User, Session, Message, Document, Memory, ToolRun, Finding, VoiceInteraction, WorkspaceRecord
 from backend.auth import hash_password, verify_password, create_access_token, get_current_user
-from backend.services.ai_service import ai_service
+from backend.services.ai_service import ai_service, AIQuotaError
 from backend.services.agent_service import agent_service
 
 
@@ -664,22 +664,29 @@ async def analyze_code(
 ):
     try:
         analysis = await ai_service.analyze_code(body.code, body.language)
-        now = datetime.now(timezone.utc).isoformat()
-        data = {
-            "code": body.code,
-            "language": body.language,
-            **analysis,
-            "createdAt": now,
+    except AIQuotaError:
+        analysis = {
+            "vulnerabilities": [
+                {"id": "v1", "type": "Potential Injection", "severity": "medium", "description": "Input handling may need validation — full AI analysis unavailable (quota limit)", "line": 1, "suggestion": "Validate and sanitize all inputs", "mitreTechnique": "T1059"},
+            ],
+            "securityScore": 50,
+            "mitreTags": ["T1059"],
+            "exploitPotential": "Analysis pending — Gemini API quota reached. Re-run when quota resets.",
+            "recommendations": ["Enable full AI analysis for detailed findings", "Manually review input validation", "Check dependency versions"],
+            "aiNote": "Fallback response — Gemini quota exceeded",
         }
-        rec = await _save_workspace(
-            db, "coding", "analysis",
-            title=f"{body.language.upper()} Analysis",
-            data=data,
-            user_id=current_user.id if current_user else None,
-        )
-        return {"id": rec.id, **data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    now = datetime.now(timezone.utc).isoformat()
+    data = {"code": body.code, "language": body.language, **analysis, "createdAt": now}
+    rec = await _save_workspace(
+        db, "coding", "analysis",
+        title=f"{body.language.upper()} Analysis",
+        data=data,
+        user_id=current_user.id if current_user else None,
+    )
+    return {"id": rec.id, **data}
 
 
 @app.post("/api/coding/generate-exploit")
@@ -690,23 +697,28 @@ async def generate_exploit(
 ):
     try:
         exploit = await ai_service.generate_exploit(body.code, body.exploitType, body.language)
-        now = datetime.now(timezone.utc).isoformat()
-        data = {
-            "targetCode": body.code,
-            "exploitType": body.exploitType,
-            "language": body.language,
-            **exploit,
-            "createdAt": now,
+    except AIQuotaError:
+        exploit = {
+            "payload": f"# {body.exploitType} PoC — AI quota limit reached\n# Re-run when Gemini API quota resets\nprint('Exploit generation requires AI — please retry later')",
+            "description": f"Educational {body.exploitType} exploit template. Full AI generation requires Gemini API quota.",
+            "mitreTechnique": "T1190",
+            "riskLevel": "medium",
+            "preventions": ["Input validation and sanitization", "Web application firewall", "Least privilege access"],
+            "educational_note": "For authorized testing only. Full analysis available when AI quota resets.",
+            "aiNote": "Fallback response — Gemini quota exceeded",
         }
-        rec = await _save_workspace(
-            db, "coding", "exploit",
-            title=f"{body.exploitType} Exploit",
-            data=data,
-            user_id=current_user.id if current_user else None,
-        )
-        return {"id": rec.id, **data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    now = datetime.now(timezone.utc).isoformat()
+    data = {"targetCode": body.code, "exploitType": body.exploitType, "language": body.language, **exploit, "createdAt": now}
+    rec = await _save_workspace(
+        db, "coding", "exploit",
+        title=f"{body.exploitType} Exploit",
+        data=data,
+        user_id=current_user.id if current_user else None,
+    )
+    return {"id": rec.id, **data}
 
 
 @app.get("/api/coding/analyses")
@@ -741,6 +753,7 @@ async def create_simulation(
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    ai_error = None
     try:
         prompt = f"""You are a red team specialist. Create a detailed, realistic attack simulation plan for authorized penetration testing.
 Target: {body.target}
@@ -761,17 +774,37 @@ Return valid JSON with this structure (no markdown, no code fences):
 IMPORTANT: This simulation is for authorized security testing only."""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.4)
         parsed = json.loads(result)
-        now = datetime.now(timezone.utc).isoformat()
-        data = {"name": body.name, "target": body.target, "attackType": body.attackType, **parsed, "createdAt": now}
-        rec = await _save_workspace(
-            db, "redteam", "simulation",
-            title=body.name,
-            data=data,
-            user_id=current_user.id if current_user else None,
-        )
-        return {"id": rec.id, **data}
+    except AIQuotaError:
+        parsed = {
+            "phase": "reconnaissance", "progress": 0, "status": "planned",
+            "findings": [
+                {"type": "Target Surface", "severity": "medium", "description": f"Initial assessment of {body.target} attack surface", "mitreTechnique": "T1595"},
+                {"type": "Exposed Services", "severity": "high", "description": "Services enumeration pending full scan", "mitreTechnique": "T1046"},
+            ],
+            "steps": [
+                "Phase 1: Passive reconnaissance — WHOIS, DNS, OSINT",
+                "Phase 2: Active scanning — port/service detection",
+                "Phase 3: Vulnerability assessment — CVE mapping",
+                "Phase 4: Exploitation — targeted attacks on confirmed vulnerabilities",
+                "Phase 5: Post-exploitation — lateral movement, persistence",
+                "Phase 6: Reporting — findings documentation",
+            ],
+            "riskLevel": "high", "estimatedDuration": "3-5 days",
+            "prerequisites": ["Written authorization", "Isolated test environment", "Rules of engagement defined"],
+            "aiNote": "Fallback plan — Gemini quota exceeded. Full AI simulation available when quota resets.",
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    now = datetime.now(timezone.utc).isoformat()
+    data = {"name": body.name, "target": body.target, "attackType": body.attackType, **parsed, "createdAt": now}
+    rec = await _save_workspace(
+        db, "redteam", "simulation",
+        title=body.name,
+        data=data,
+        user_id=current_user.id if current_user else None,
+    )
+    return {"id": rec.id, **data}
 
 
 @app.post("/api/redteam/campaigns")
@@ -794,17 +827,28 @@ Return valid JSON (no markdown):
 "indicators_of_phishing": ["Urgency language", "Mismatched sender domain", "Generic greeting", "Suspicious link destination"]}}"""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.4)
         parsed = json.loads(result)
-        now = datetime.now(timezone.utc).isoformat()
-        data = {"name": body.name, **parsed, "createdAt": now}
-        rec = await _save_workspace(
-            db, "redteam", "campaign",
-            title=body.name,
-            data=data,
-            user_id=current_user.id if current_user else None,
-        )
-        return {"id": rec.id, **data}
+    except AIQuotaError:
+        parsed = {
+            "template": body.template or "Security awareness phishing simulation template — full AI generation available when quota resets.",
+            "subject": "Important: Immediate Action Required — Account Verification",
+            "targetList": body.targets[:5],
+            "sendsCompleted": 0, "opensTracked": 0, "clicksTracked": 0, "credentialsHarvested": 0, "status": "draft",
+            "educational_tips": ["Always verify the sender domain before clicking", "Check for spelling errors in URLs and sender address", "Never enter credentials after clicking an email link — go directly to the site", "Report suspicious emails to your IT security team immediately", "Enable MFA on all accounts"],
+            "indicators_of_phishing": ["Urgency or threatening language", "Mismatched sender domain", "Generic greeting (Dear Customer)", "Suspicious link destination on hover", "Unexpected attachment"],
+            "aiNote": "Fallback campaign — Gemini quota exceeded. Full AI template generation available when quota resets.",
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    now = datetime.now(timezone.utc).isoformat()
+    data = {"name": body.name, **parsed, "createdAt": now}
+    rec = await _save_workspace(
+        db, "redteam", "campaign",
+        title=body.name,
+        data=data,
+        user_id=current_user.id if current_user else None,
+    )
+    return {"id": rec.id, **data}
 
 
 @app.post("/api/redteam/chains/generate")
@@ -830,18 +874,32 @@ Return valid JSON (no markdown):
 "mitigations": ["Network segmentation", "Privileged access workstations", "MFA enforcement", "EDR solutions"]}}"""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.4)
         parsed = json.loads(result)
-        name = f"Attack Chain - {body.target}"
-        now = datetime.now(timezone.utc).isoformat()
-        data = {"name": name, "target": body.target, "objective": body.objective, **parsed, "createdAt": now}
-        rec = await _save_workspace(
-            db, "redteam", "chain",
-            title=name,
-            data=data,
-            user_id=current_user.id if current_user else None,
-        )
-        return {"id": rec.id, **data}
+    except AIQuotaError:
+        parsed = {
+            "steps": [
+                {"technique": "Initial Access - Spearphishing", "mitreTactic": "TA0001", "mitreTechnique": "T1566", "description": f"Craft targeted spearphishing email against {body.target} to gain initial foothold", "automated": False, "status": "pending", "expectedDuration": "1-2 days"},
+                {"technique": "Execution - Script Interpreter", "mitreTactic": "TA0002", "mitreTechnique": "T1059", "description": "Execute malicious script to establish persistence and C2 channel", "automated": True, "status": "pending", "expectedDuration": "30-60 minutes"},
+                {"technique": "Privilege Escalation", "mitreTactic": "TA0004", "mitreTechnique": "T1068", "description": "Exploit local vulnerability or misconfiguration to gain elevated privileges", "automated": False, "status": "pending", "expectedDuration": "2-4 hours"},
+                {"technique": "Lateral Movement", "mitreTactic": "TA0008", "mitreTechnique": "T1550", "description": f"Move laterally toward objective: {body.objective}", "automated": True, "status": "pending", "expectedDuration": "1-2 days"},
+                {"technique": "Exfiltration / Objective Completion", "mitreTactic": "TA0010", "mitreTechnique": "T1041", "description": "Complete the stated objective with appropriate evidence collection", "automated": False, "status": "pending", "expectedDuration": "2-4 hours"},
+            ],
+            "currentStep": 0, "overallProgress": 0, "riskLevel": "critical", "timeline": "1-2 weeks",
+            "mitigations": ["Network segmentation", "Privileged access workstations", "MFA enforcement", "EDR/XDR deployment", "Threat hunting"],
+            "aiNote": "Fallback chain — Gemini quota exceeded. Full AI generation available when quota resets.",
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    name = f"Attack Chain - {body.target}"
+    now = datetime.now(timezone.utc).isoformat()
+    data = {"name": name, "target": body.target, "objective": body.objective, **parsed, "createdAt": now}
+    rec = await _save_workspace(
+        db, "redteam", "chain",
+        title=name,
+        data=data,
+        user_id=current_user.id if current_user else None,
+    )
+    return {"id": rec.id, **data}
 
 
 @app.get("/api/redteam/simulations")
@@ -888,8 +946,8 @@ async def osint_domain(
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    d = body.domain
     try:
-        d = body.domain
         prompt = f"""You are an OSINT specialist conducting authorized domain intelligence gathering.
 Analyze domain: {d}
 
@@ -913,17 +971,37 @@ Return comprehensive domain intelligence as valid JSON (no markdown, no code fen
 Note: This is simulated OSINT for authorized security research."""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.3)
         parsed = json.loads(result)
-        now = datetime.now(timezone.utc).isoformat()
-        data = {"domain": d, **parsed, "lastUpdated": now}
-        rec = await _save_workspace(
-            db, "osint", "domain",
-            title=d,
-            data=data,
-            user_id=current_user.id if current_user else None,
-        )
-        return {"id": rec.id, **data}
+    except AIQuotaError:
+        base = d.split(".")[0]
+        parsed = {
+            "subdomains": [f"www.{d}", f"mail.{d}", f"api.{d}", f"dev.{d}", f"vpn.{d}"],
+            "ipAddresses": ["203.0.113.10", "203.0.113.11"],
+            "technologies": [
+                {"name": "nginx", "version": "1.24.0", "category": "Web Server"},
+                {"name": "CloudFlare", "version": None, "category": "CDN/WAF"},
+            ],
+            "certificates": [{"issuer": "Let's Encrypt", "subject": f"*.{d}", "validFrom": "2024-01-01T00:00:00Z", "validTo": "2025-01-01T00:00:00Z", "sans": [f"*.{d}", d]}],
+            "dnsRecords": {"A": ["203.0.113.10"], "MX": [f"10 mail.{d}"], "TXT": ["v=spf1 ~all"], "NS": [f"ns1.{d}"]},
+            "socialMedia": [{"platform": "LinkedIn", "url": f"https://linkedin.com/company/{base}", "verified": False}],
+            "whois": {"registrar": "Unknown — AI quota limit reached", "registrationDate": "Unknown", "expirationDate": "Unknown", "privacyProtected": True},
+            "breaches": [],
+            "openPorts": [80, 443],
+            "riskScore": 40,
+            "riskFactors": ["Full AI analysis unavailable — Gemini quota exceeded"],
+            "aiNote": "Fallback intelligence — Gemini quota exceeded. Full AI OSINT available when quota resets.",
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    now = datetime.now(timezone.utc).isoformat()
+    data = {"domain": d, **parsed, "lastUpdated": now}
+    rec = await _save_workspace(
+        db, "osint", "domain",
+        title=d,
+        data=data,
+        user_id=current_user.id if current_user else None,
+    )
+    return {"id": rec.id, **data}
 
 
 @app.post("/api/osint/github")
@@ -932,8 +1010,8 @@ async def osint_github(
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    t = body.target
     try:
-        t = body.target
         prompt = f"""Perform authorized OSINT analysis of GitHub organization or user: {t}
 
 Return comprehensive GitHub intelligence as valid JSON (no markdown):
@@ -955,17 +1033,32 @@ Return comprehensive GitHub intelligence as valid JSON (no markdown):
 "riskFactors": ["Hardcoded secrets in history", "Outdated dependencies", "Public repository exposes configuration"]}}"""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.3)
         parsed = json.loads(result)
-        now = datetime.now(timezone.utc).isoformat()
-        data = {**parsed, "target": t, "lastUpdated": now}
-        rec = await _save_workspace(
-            db, "osint", "github",
-            title=t,
-            data=data,
-            user_id=current_user.id if current_user else None,
-        )
-        return {"id": rec.id, **data}
+    except AIQuotaError:
+        parsed = {
+            "organization": t,
+            "repositories": [
+                {"name": f"{t}-web", "description": "Main web application", "language": "JavaScript", "stars": 42, "forks": 8, "isPrivate": False, "hasSecrets": False, "lastCommit": "2024-01-15", "vulnerabilities": []},
+                {"name": f"{t}-api", "description": "Backend API", "language": "Python", "stars": 15, "forks": 3, "isPrivate": False, "hasSecrets": False, "lastCommit": "2024-01-10", "vulnerabilities": []},
+            ],
+            "users": [{"username": f"admin-{t}", "email": f"admin@{t}.com", "name": "Organization Admin", "publicRepos": 8, "followers": 20, "company": t}],
+            "sensitiveFiles": [],
+            "totalRepos": 5, "totalMembers": 3,
+            "riskLevel": "low",
+            "riskFactors": ["Full AI analysis unavailable — Gemini quota exceeded"],
+            "aiNote": "Fallback intelligence — Gemini quota exceeded. Full AI GitHub OSINT available when quota resets.",
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    now = datetime.now(timezone.utc).isoformat()
+    data = {**parsed, "target": t, "lastUpdated": now}
+    rec = await _save_workspace(
+        db, "osint", "github",
+        title=t,
+        data=data,
+        user_id=current_user.id if current_user else None,
+    )
+    return {"id": rec.id, **data}
 
 
 @app.post("/api/osint/shodan")
@@ -974,8 +1067,8 @@ async def osint_shodan(
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    q = body.query
     try:
-        q = body.query
         prompt = f"""Simulate a Shodan internet exposure analysis for the query: {q}
 
 Return comprehensive exposure intelligence as valid JSON (no markdown):
@@ -991,17 +1084,32 @@ Return comprehensive exposure intelligence as valid JSON (no markdown):
 "exposureScore": 67}}"""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.3)
         parsed = json.loads(result)
-        now = datetime.now(timezone.utc).isoformat()
-        data = {**parsed, "lastUpdated": now}
-        rec = await _save_workspace(
-            db, "osint", "shodan",
-            title=q,
-            data=data,
-            user_id=current_user.id if current_user else None,
-        )
-        return {"id": rec.id, **data}
+    except AIQuotaError:
+        parsed = {
+            "query": q,
+            "results": [
+                {"ip": "198.51.100.42", "hostname": "srv1.example.com", "port": 22, "protocol": "tcp", "service": "ssh", "banner": "SSH-2.0-OpenSSH_8.2p1", "location": {"country": "United States", "city": "Los Angeles", "latitude": 34.05, "longitude": -118.24}, "vulns": [], "lastSeen": "2024-01-20T15:30:00Z", "org": "AS13335"},
+                {"ip": "198.51.100.55", "hostname": "web.example.org", "port": 443, "protocol": "tcp", "service": "https", "banner": "HTTP/1.1 200 OK", "location": {"country": "Germany", "city": "Frankfurt", "latitude": 50.11, "longitude": 8.68}, "vulns": [], "lastSeen": "2024-01-21T08:15:00Z", "org": "AS24940"},
+            ],
+            "totalResults": 0,
+            "countriesFound": ["United States", "Germany"],
+            "topServices": [{"name": "http", "count": 0}, {"name": "https", "count": 0}, {"name": "ssh", "count": 0}],
+            "vulnerabilities": [],
+            "exposureScore": 0,
+            "aiNote": "Fallback results — Gemini quota exceeded. Full AI Shodan simulation available when quota resets.",
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    now = datetime.now(timezone.utc).isoformat()
+    data = {**parsed, "lastUpdated": now}
+    rec = await _save_workspace(
+        db, "osint", "shodan",
+        title=q,
+        data=data,
+        user_id=current_user.id if current_user else None,
+    )
+    return {"id": rec.id, **data}
 
 
 @app.get("/api/osint/domain/recent")
@@ -1048,8 +1156,8 @@ async def generate_report(
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    sections_str = ", ".join(body.sections) if body.sections else "Executive Summary, Scope, Methodology, Findings, Recommendations"
     try:
-        sections_str = ", ".join(body.sections) if body.sections else "Executive Summary, Scope, Methodology, Findings, Recommendations"
         prompt = f"""Generate a comprehensive professional {body.type} security assessment report.
 Title: {body.title}
 Report Type: {body.type}
@@ -1082,17 +1190,46 @@ Return valid JSON (no markdown, no code fences):
 "methodology": "Gray-box penetration test following PTES standard"}}"""
         result = await ai_service.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.3)
         parsed = json.loads(result)
-        now = datetime.now(timezone.utc).isoformat()
-        data = {**parsed, "createdAt": now, "updatedAt": now}
-        rec = await _save_workspace(
-            db, "reports", "report",
-            title=body.title,
-            data=data,
-            user_id=current_user.id if current_user else None,
-        )
-        return {"id": rec.id, **data}
+    except AIQuotaError:
+        parsed = {
+            "title": body.title, "type": body.type, "status": "completed", "progress": 100,
+            "findings": [
+                {"id": "f-001", "title": "Weak Password Policy", "severity": "medium", "category": "Authentication", "description": "Password complexity requirements are insufficient for modern security standards.", "recommendation": "Implement strong password policy with minimum 12 characters, complexity requirements, and MFA.", "mitreTechnique": "T1110", "cvss": 6.5, "cve": None},
+                {"id": "f-002", "title": "Unencrypted Data Transmission", "severity": "high", "category": "Encryption", "description": "Sensitive data may be transmitted without proper encryption in some communication paths.", "recommendation": "Enforce TLS 1.3 on all connections. Disable legacy SSL/TLS versions.", "mitreTechnique": "T1040", "cvss": 7.5, "cve": None},
+                {"id": "f-003", "title": "Missing Security Headers", "severity": "medium", "category": "Web Security", "description": "HTTP security headers not fully configured across all endpoints.", "recommendation": "Implement CSP, HSTS, X-Frame-Options, X-Content-Type-Options headers.", "mitreTechnique": "T1190", "cvss": 5.3, "cve": None},
+                {"id": "f-004", "title": "Inadequate Logging and Monitoring", "severity": "medium", "category": "Detection", "description": "Security events are not being adequately logged or monitored for anomalies.", "recommendation": "Implement SIEM solution with alerting for suspicious activity patterns.", "mitreTechnique": "T1562", "cvss": 5.0, "cve": None},
+            ],
+            "summary": {"totalFindings": 4, "criticalCount": 0, "highCount": 1, "mediumCount": 3, "lowCount": 0, "infoCount": 0, "overallRisk": "medium", "riskScore": 55},
+            "mitreMapping": [
+                {"tactic": "Initial Access", "tacticId": "TA0001", "techniques": ["T1190"]},
+                {"tactic": "Credential Access", "tacticId": "TA0006", "techniques": ["T1110"]},
+                {"tactic": "Defense Evasion", "tacticId": "TA0005", "techniques": ["T1562"]},
+            ],
+            "recommendations": [
+                "Implement multi-factor authentication across all systems",
+                "Enforce TLS 1.3 on all network communications",
+                "Deploy comprehensive security monitoring and SIEM",
+                "Conduct regular security awareness training",
+                "Establish a vulnerability management and patch program",
+            ],
+            "executiveSummary": f"This {body.type} security assessment of '{body.title}' identified 4 findings requiring attention. The overall security posture is rated MEDIUM risk. Priority should be given to addressing the high-severity unencrypted data transmission finding.",
+            "technicalDetails": "Assessment based on industry standard methodologies including OWASP Testing Guide and NIST SP 800-115. Full AI-enhanced analysis available when Gemini API quota resets.",
+            "scope": sections_str,
+            "methodology": f"{body.type.title()} assessment following industry standards",
+            "aiNote": "Fallback report — Gemini quota exceeded. Full AI report generation available when quota resets.",
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    now = datetime.now(timezone.utc).isoformat()
+    data = {**parsed, "createdAt": now, "updatedAt": now}
+    rec = await _save_workspace(
+        db, "reports", "report",
+        title=body.title,
+        data=data,
+        user_id=current_user.id if current_user else None,
+    )
+    return {"id": rec.id, **data}
 
 
 @app.get("/api/reports/templates")
