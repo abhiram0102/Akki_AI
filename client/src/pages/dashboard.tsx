@@ -57,7 +57,7 @@ function ClientOnlyDashboard({ audioContext, setAudioContext }: ClientDashboardP
           <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gradient-to-br from-cyber-blue to-cyber-green flex items-center justify-center animate-pulse">
             <i className="fas fa-brain text-white text-2xl" />
           </div>
-          <p className="text-white">Loading AI Copilot...</p>
+          <p className="text-white font-mono font-bold tracking-wider">LOADING AKKI AI...</p>
         </div>
       </div>
     );

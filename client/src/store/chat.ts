@@ -1,11 +1,30 @@
 import { create } from "zustand";
 import { api } from "@/lib/api";
 
-interface Message {
+export interface AgentInfo {
+  agent: string;
+  agentName: string;
+  agentRole: string;
+  agentColor: string;
+}
+
+export interface ToolCallResult {
+  id: string;
+  name: string;
+  displayName: string;
+  params: Record<string, any>;
+  result: Record<string, any>;
+  status: "success" | "error" | "running";
+}
+
+export interface Message {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
   createdAt: string;
+  isStreaming?: boolean;
+  agentInfo?: AgentInfo;
+  toolCalls?: ToolCallResult[];
   metadata?: {
     voiceInput?: boolean;
     emotionalTone?: string;
@@ -13,14 +32,6 @@ interface Message {
     ragUsed?: boolean;
     confidence?: number;
   };
-  toolCalls?: Array<{
-    toolName: string;
-    arguments: any;
-    status: "pending" | "approved" | "executed" | "failed";
-    riskLevel: "low" | "medium" | "high";
-    result?: any;
-    error?: string;
-  }>;
 }
 
 interface AgentPlan {
@@ -30,11 +41,7 @@ interface AgentPlan {
     description: string;
     status: "pending" | "executing" | "completed" | "failed" | "skipped";
     toolName?: string;
-    arguments?: any;
-    requiresApproval?: boolean;
-    riskLevel?: "low" | "medium" | "high";
     result?: any;
-    error?: string;
   }>;
   currentStep: number;
   status: "planning" | "executing" | "completed" | "failed";
@@ -46,9 +53,11 @@ interface ChatStore {
   currentSessionId: string | null;
   currentPlan: AgentPlan | null;
   isLoading: boolean;
+  isStreaming: boolean;
+  activeAgent: AgentInfo | null;
   error: string | null;
-  
-  sendMessage: (content: string, options?: { voiceInput?: boolean; emotionalTone?: string }) => Promise<void>;
+
+  sendMessage: (content: string, options?: { voiceInput?: boolean; emotionalTone?: string; useStream?: boolean }) => Promise<void>;
   setCurrentSession: (sessionId: string) => void;
   clearChat: () => void;
   addMessage: (message: Message) => void;
@@ -63,94 +72,172 @@ export const useChat = create<ChatStore>((set, get) => ({
   currentSessionId: null,
   currentPlan: null,
   isLoading: false,
+  isStreaming: false,
+  activeAgent: null,
   error: null,
 
   sendMessage: async (content: string, options = {}) => {
-    const { voiceInput = true , emotionalTone } = options;
-    
+    const { voiceInput = false, emotionalTone, useStream = false } = options;
+
     set({ isLoading: true, error: null });
 
-    const tempId = `temp-${Date.now()}`;
-    
-    try {
-      // Add user message immediately with temporary ID
-      const userMessage: Message = {
-        id: tempId,
-        role: "user",
-        content,
+    const tempUserMsgId = `temp-user-${Date.now()}`;
+
+    // Add user message immediately
+    const userMessage: Message = {
+      id: tempUserMsgId,
+      role: "user",
+      content,
+      createdAt: new Date().toISOString(),
+      metadata: { voiceInput, emotionalTone }
+    };
+    set(state => ({ messages: [...state.messages, userMessage] }));
+
+    if (useStream) {
+      // ── STREAMING mode ────────────────────────────────────────────
+      const streamMsgId = `stream-${Date.now()}`;
+      const streamMsg: Message = {
+        id: streamMsgId,
+        role: "assistant",
+        content: "",
         createdAt: new Date().toISOString(),
-        metadata: { voiceInput, emotionalTone }
+        isStreaming: true,
       };
-      
-      set(state => ({
-        messages: [...state.messages, userMessage]
-      }));
+      set(state => ({ messages: [...state.messages, streamMsg], isStreaming: true }));
 
-      // Send to backend
-      const response = await api.post('/api/protected/chat/message', {
-        content,
-        sessionId: get().currentSessionId, // Let backend handle session creation
-        voiceInput,
-        emotionalTone
-      });
-
-      const data = response?.data ?? {};
-      const nextSessionId = data.sessionId ?? get().currentSessionId ?? null;
-      const nextPlan = data.agentPlan ?? get().currentPlan ?? null;
-
-      // Normalize messages from various possible shapes
-      const normalized: Message[] = [];
-      if (data.userMessage && data.assistantMessage) {
-        normalized.push(data.userMessage, data.assistantMessage);
-      } else if (Array.isArray(data.messages) && data.messages.length) {
-        normalized.push(...data.messages);
-      } else if (typeof data.assistant === 'string' && data.assistant.trim()) {
-        normalized.push({
-          id: `asst-${Date.now()}`,
-          role: 'assistant',
-          content: data.assistant,
-          createdAt: new Date().toISOString()
+      try {
+        const token = localStorage.getItem("auth_token");
+        const res = await fetch("/api/chat/stream", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`,
+          },
+          body: JSON.stringify({ content, sessionId: get().currentSessionId }),
         });
-      } else {
-        // Ensure at least echo the user message back if backend didn't return messages
-        normalized.push({
-          id: `user-${Date.now()}`,
-          role: 'user',
-          content,
-          createdAt: new Date().toISOString(),
-          metadata: { voiceInput, emotionalTone }
-        });
+
+        const reader = res.body?.getReader();
+        const decoder = new TextDecoder();
+        let accumulated = "";
+        let agentInfo: AgentInfo | null = null;
+
+        while (reader) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const text = decoder.decode(value, { stream: true });
+          const lines = text.split("\n");
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            try {
+              const evt = JSON.parse(line.slice(6));
+              if (evt.type === "agent") {
+                agentInfo = {
+                  agent: evt.agent,
+                  agentName: evt.agentName,
+                  agentRole: evt.agentRole,
+                  agentColor: "cyber-blue",
+                };
+                set({ activeAgent: agentInfo });
+                set(state => ({
+                  messages: state.messages.map(m =>
+                    m.id === streamMsgId ? { ...m, agentInfo: agentInfo! } : m
+                  )
+                }));
+              } else if (evt.type === "token") {
+                accumulated += evt.text;
+                set(state => ({
+                  messages: state.messages.map(m =>
+                    m.id === streamMsgId ? { ...m, content: accumulated } : m
+                  )
+                }));
+              } else if (evt.type === "done") {
+                set(state => ({
+                  messages: state.messages.map(m =>
+                    m.id === streamMsgId ? { ...m, isStreaming: false } : m
+                  ),
+                  isStreaming: false,
+                }));
+              }
+            } catch { /* skip malformed lines */ }
+          }
+        }
+      } catch (error) {
+        set(state => ({
+          messages: state.messages.filter(m => m.id !== streamMsgId),
+          error: error instanceof Error ? error.message : "Streaming failed",
+          isStreaming: false,
+        }));
       }
+    } else {
+      // ── REGULAR mode ──────────────────────────────────────────────
+      try {
+        const response = await api.post("/api/protected/chat/message", {
+          content,
+          sessionId: get().currentSessionId,
+          voiceInput,
+          emotionalTone,
+        });
 
-      // Update with real messages and session info
-      set(state => ({
-        messages: [
-          ...state.messages.filter(m => m.id !== tempId),
-          ...normalized
-        ],
-        currentSessionId: nextSessionId,
-        currentPlan: nextPlan
-      }));
+        const data = response?.data ?? {};
+        const nextSessionId = data.sessionId ?? get().currentSessionId ?? null;
+        const nextPlan = data.agentPlan ?? get().currentPlan ?? null;
 
-    } catch (error) {
-      console.error('Error sending message:', error);
-      
-      // Remove the temporary message on error
-      set(state => ({
-        messages: state.messages.filter(m => m.id !== tempId),
-        error: error instanceof Error ? error.message : 'Failed to send message'
-      }));
-      
-      throw error;
-    } finally {
-      set({ isLoading: false });
+        // Extract agent info from response
+        const assistantMsg = data.assistantMessage;
+        const agentInfo: AgentInfo | undefined = assistantMsg ? {
+          agent: assistantMsg.agent || "planner",
+          agentName: assistantMsg.agentName || "NEXUS",
+          agentRole: assistantMsg.agentRole || "Orchestration",
+          agentColor: assistantMsg.agentColor || "cyber-blue",
+        } : undefined;
+
+        if (agentInfo) set({ activeAgent: agentInfo });
+
+        const normalized: Message[] = [];
+        if (data.userMessage && data.assistantMessage) {
+          normalized.push(
+            { ...data.userMessage, role: "user" },
+            {
+              ...data.assistantMessage,
+              role: "assistant",
+              agentInfo,
+              toolCalls: data.assistantMessage.toolCalls || [],
+            }
+          );
+        } else if (Array.isArray(data.messages) && data.messages.length) {
+          normalized.push(...data.messages);
+        } else {
+          normalized.push({
+            id: `asst-${Date.now()}`,
+            role: "assistant",
+            content: "I encountered an issue. Please try again.",
+            createdAt: new Date().toISOString(),
+          });
+        }
+
+        set(state => ({
+          messages: [
+            ...state.messages.filter(m => m.id !== tempUserMsgId),
+            ...normalized,
+          ],
+          currentSessionId: nextSessionId,
+          currentPlan: nextPlan,
+        }));
+      } catch (error) {
+        set(state => ({
+          messages: state.messages.filter(m => m.id !== tempUserMsgId),
+          error: error instanceof Error ? error.message : "Failed to send message",
+        }));
+        throw error;
+      }
     }
+
+    set({ isLoading: false });
   },
 
   retryLastMessage: async () => {
     const { messages } = get();
-    const lastUserMessage = [...messages].reverse().find(m => m.role === 'user');
-    
+    const lastUserMessage = [...messages].reverse().find(m => m.role === "user");
     if (lastUserMessage) {
       await get().sendMessage(lastUserMessage.content, lastUserMessage.metadata);
     }
@@ -159,34 +246,9 @@ export const useChat = create<ChatStore>((set, get) => ({
   approveToolExecution: async (toolRunId: string) => {
     try {
       set({ isLoading: true, error: null });
-      
-      const response = await api.post(`/api/protected/tools/${toolRunId}/approve`);
-      
-      // Update the current plan or messages with the tool execution result
-      set(state => {
-        const updatedMessages = state.messages.map(message => {
-          if (message.toolCalls) {
-            const updatedToolCalls = message.toolCalls.map(tool => {
-              if (tool.status === 'pending') {
-                return {
-                  ...tool,
-                  status: 'executed' as const,
-                  result: response.data.result
-                };
-              }
-              return tool;
-            });
-            return { ...message, toolCalls: updatedToolCalls };
-          }
-          return message;
-        });
-
-        return { messages: updatedMessages };
-      });
-      
+      await api.post(`/api/protected/tools/${toolRunId}/approve`);
     } catch (error) {
-      console.error('Tool approval error:', error);
-      set({ error: error instanceof Error ? error.message : 'Failed to approve tool execution' });
+      set({ error: error instanceof Error ? error.message : "Failed to approve" });
       throw error;
     } finally {
       set({ isLoading: false });
@@ -194,23 +256,15 @@ export const useChat = create<ChatStore>((set, get) => ({
   },
 
   setCurrentSession: (sessionId: string) => {
-    set({ currentSessionId: sessionId, messages: [], currentPlan: null, error: null });
+    set({ currentSessionId: sessionId, messages: [], currentPlan: null, error: null, activeAgent: null });
   },
 
   clearChat: () => {
-    set({ 
-      messages: [], 
-      currentSessionId: null, 
-      currentPlan: null, 
-      error: null,
-      isLoading: false 
-    });
+    set({ messages: [], currentSessionId: null, currentPlan: null, error: null, isLoading: false, isStreaming: false, activeAgent: null });
   },
 
   addMessage: (message: Message) => {
-    set(state => ({
-      messages: [...state.messages, message]
-    }));
+    set(state => ({ messages: [...state.messages, message] }));
   },
 
   updatePlan: (plan: AgentPlan) => {
@@ -219,5 +273,5 @@ export const useChat = create<ChatStore>((set, get) => ({
 
   setError: (error: string | null) => {
     set({ error });
-  }
+  },
 }));

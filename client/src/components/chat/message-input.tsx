@@ -1,6 +1,4 @@
 import { useState, useRef, useCallback } from "react";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { useChat } from "@/store/chat";
 import { useVoice } from "@/hooks/use-voice";
 import { useEmotionalState } from "@/store/emotional-state";
@@ -12,91 +10,70 @@ interface MessageInputProps {
   audioContext: AudioContext | null;
 }
 
+const QUICK_PROMPTS = [
+  { label: "DNS Lookup", prompt: "Perform a DNS lookup for google.com", icon: "fas fa-search" },
+  { label: "Explain SQLi", prompt: "Explain SQL injection with a working example", icon: "fas fa-code" },
+  { label: "Port Scan", prompt: "Scan common ports on scanme.nmap.org", icon: "fas fa-network-wired" },
+  { label: "Kerberoasting", prompt: "How does Kerberoasting work in Active Directory?", icon: "fas fa-key" },
+];
+
 export default function MessageInput({ audioInitialized, audioContext }: MessageInputProps) {
   const [message, setMessage] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [showQuick, setShowQuick] = useState(false);
+  const [useStream, setUseStream] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  
-  const { sendMessage } = useChat();
+
+  const { sendMessage, isLoading, isStreaming, activeAgent } = useChat();
   const { isListening, toggleListening, isActive } = useVoice(audioContext);
   const { emotionalState } = useEmotionalState();
   const { toast } = useToast();
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!message.trim() || isLoading) return;
+  const isBusy = isLoading || isStreaming;
 
-    setIsLoading(true);
+  const handleSubmit = async (e: React.FormEvent, overrideMsg?: string) => {
+    e.preventDefault();
+    const content = (overrideMsg || message).trim();
+    if (!content || isBusy) return;
+
+    setMessage("");
+    setShowQuick(false);
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
+
     try {
-      await sendMessage(message.trim(), {
+      await sendMessage(content, {
         voiceInput: false,
-        emotionalTone: emotionalState.currentMood
+        emotionalTone: emotionalState.currentMood,
+        useStream,
       });
-      setMessage("");
-      
-      // Auto-resize textarea
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-      }
     } catch (error) {
       toast({
-        title: "Error sending message",
-        description: error instanceof Error ? error.message : "An error occurred",
-        variant: "destructive"
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to send",
+        variant: "destructive",
       });
-    } finally {
-      setIsLoading(false);
     }
   };
 
   const handleFileUpload = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
-
     const file = files[0];
-    const maxSize = 50 * 1024 * 1024; // 50MB
-    
-    if (file.size > maxSize) {
-      toast({
-        title: "File too large",
-        description: "Please select a file smaller than 50MB",
-        variant: "destructive"
-      });
+    if (file.size > 50 * 1024 * 1024) {
+      toast({ title: "File too large", description: "Max 50MB", variant: "destructive" });
       return;
     }
-
     try {
-      setIsLoading(true);
-      await api.uploadFile('/api/protected/rag/ingest', file, {
+      await api.uploadFile("/api/protected/rag/ingest", file, {
         title: file.name,
-        tags: ['uploaded-via-chat']
+        tags: ["uploaded-via-chat"],
       });
-      
-      toast({
-        title: "Document uploaded",
-        description: `${file.name} has been processed and added to the knowledge base`,
-      });
-
-      // Auto-send a message about the upload
-      await sendMessage(`I just uploaded "${file.name}". Can you tell me what you learned from it?`);
-      
+      toast({ title: "Document uploaded", description: `${file.name} added to knowledge base` });
+      await sendMessage(`I just uploaded "${file.name}". What did you learn from it?`, { useStream });
     } catch (error) {
-      toast({
-        title: "Upload failed",
-        description: error instanceof Error ? error.message : "Failed to upload document",
-        variant: "destructive"
-      });
-    } finally {
-      setIsLoading(false);
+      toast({ title: "Upload failed", description: error instanceof Error ? error.message : "Failed", variant: "destructive" });
     }
-  }, [toast, sendMessage]);
-
-  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    handleFileUpload(e.target.files);
-    // Reset input value to allow same file to be selected again
-    e.target.value = '';
-  };
+  }, [toast, sendMessage, useStream]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -105,168 +82,167 @@ export default function MessageInput({ audioInitialized, audioContext }: Message
     }
   };
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(true);
-  };
-
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(false);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(false);
-    handleFileUpload(e.dataTransfer.files);
-  };
-
-  // Auto-resize textarea
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setMessage(e.target.value);
-    
-    // Auto-resize
-    const textarea = e.target;
-    textarea.style.height = 'auto';
-    textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
-  };
-
-  const getVoiceButtonTooltip = () => {
-    if (!isActive) return "Voice disabled - Check microphone permissions";
-    if (isListening) return "Listening... Click to stop";
-    return `Click to start voice input or say "Hey Ammu"`;
+    const ta = e.target;
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight, 160) + "px";
   };
 
   return (
-    <div 
-      className={`border-t border-white/10 p-6 transition-all duration-300 ${
-        isDragOver ? 'bg-cyber-blue/10 border-cyber-blue/50' : ''
-      }`} 
-      data-testid="message-input"
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
+    <div
+      className={`border-t p-4 transition-colors ${isDragOver ? "border-cyan-400/50 bg-cyan-400/5" : "border-white/5"}`}
+      onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+      onDragLeave={() => setIsDragOver(false)}
+      onDrop={(e) => { e.preventDefault(); setIsDragOver(false); handleFileUpload(e.dataTransfer.files); }}
     >
+      {/* Drop overlay */}
       {isDragOver && (
-        <div className="absolute inset-0 bg-cyber-blue/20 backdrop-blur-sm flex items-center justify-center z-10 rounded-lg">
+        <div className="absolute inset-0 bg-cyan-400/10 backdrop-blur-sm flex items-center justify-center z-10 rounded-lg border-2 border-dashed border-cyan-400/50">
           <div className="text-center">
-            <i className="fas fa-cloud-upload-alt text-cyber-blue text-4xl mb-2" />
-            <p className="text-white font-medium">Drop your files here</p>
-            <p className="text-gray-400 text-sm">Supported: PDF, MD, TXT, LOG, images</p>
+            <i className="fas fa-cloud-upload-alt text-cyan-400 text-3xl mb-2" />
+            <p className="text-white text-sm font-mono">Drop file to upload to knowledge base</p>
           </div>
         </div>
       )}
-      
+
+      {/* Quick prompts */}
+      {showQuick && (
+        <div className="mb-3 grid grid-cols-2 gap-2">
+          {QUICK_PROMPTS.map((qp) => (
+            <button
+              key={qp.label}
+              onClick={(e) => { setMessage(qp.prompt); setShowQuick(false); }}
+              className="flex items-center gap-2 px-3 py-2 glass-card rounded-lg border border-cyan-400/20 hover:border-cyan-400/40 text-left transition-colors group"
+            >
+              <i className={`${qp.icon} text-xs text-cyan-400`} />
+              <span className="text-xs font-mono text-gray-300 group-hover:text-white">{qp.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Active agent status bar */}
+      {activeAgent && (
+        <div className="mb-2 flex items-center gap-2 text-xs font-mono text-gray-500">
+          <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse" />
+          <span>Last response from</span>
+          <span className="text-cyan-400">{activeAgent.agentName}</span>
+          <span className="text-gray-600">·</span>
+          <span>{activeAgent.agentRole}</span>
+        </div>
+      )}
+
+      {/* Main input area */}
       <form onSubmit={handleSubmit}>
-        <div className="glass rounded-lg p-4">
-          <div className="flex items-end space-x-4">
-            <div className="flex-1">
-              <Textarea
-                ref={textareaRef}
-                value={message}
-                onChange={handleTextareaChange}
-                onKeyDown={handleKeyDown}
-                placeholder={
-                  isListening ? "Listening for voice input..." :
-                  emotionalState.bondLevel > 50 ? "What's on your mind? Ammu is here to help!" :
-                  "Ask Ammu anything about cybersecurity, or just say 'Hey Ammu' for voice input..."
-                }
-                className="w-full bg-transparent text-white placeholder-gray-400 border-none outline-none resize-none font-mono min-h-[2.5rem] max-h-[200px]"
-                disabled={isLoading || isListening}
-                data-testid="textarea-message"
-                style={{ height: 'auto' }}
-              />
-            </div>
-            
-            <div className="flex items-center space-x-2">
-              {/* Upload Button */}
+        <div className="glass-card rounded-xl border border-white/10 hover:border-cyan-400/20 transition-colors focus-within:border-cyan-400/30">
+          {/* Text area */}
+          <div className="px-4 pt-3">
+            <textarea
+              ref={textareaRef}
+              value={message}
+              onChange={handleTextareaChange}
+              onKeyDown={handleKeyDown}
+              placeholder={
+                isListening
+                  ? "🎤 Listening for voice input..."
+                  : isBusy
+                  ? "AKKI is responding..."
+                  : "Ask anything — AKKI routes to the right agent automatically..."
+              }
+              className="w-full bg-transparent text-white placeholder-gray-600 border-none outline-none resize-none font-mono text-sm min-h-[36px] max-h-[160px] leading-relaxed"
+              disabled={isBusy || isListening}
+              data-testid="textarea-message"
+              rows={1}
+            />
+          </div>
+
+          {/* Actions bar */}
+          <div className="flex items-center justify-between px-3 pb-3 pt-2 border-t border-white/5">
+            <div className="flex items-center gap-1">
+              {/* Quick prompts */}
+              <button
+                type="button"
+                onClick={() => setShowQuick(p => !p)}
+                className={`p-1.5 rounded-lg text-xs transition-colors border ${showQuick ? "border-cyan-400/50 bg-cyan-400/10 text-cyan-400" : "border-white/10 text-gray-500 hover:text-gray-300"}`}
+                title="Quick prompts"
+              >
+                <i className="fas fa-bolt" />
+              </button>
+
+              {/* Upload */}
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={isLoading}
-                className="p-2 glass rounded-lg hover:bg-white/5 transition-colors border border-white/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={isBusy}
+                className="p-1.5 rounded-lg text-xs border border-white/10 text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-40"
+                title="Upload document"
                 data-testid="button-upload"
-                title="Upload document (PDF, MD, TXT, LOG, images)"
               >
-                <i className={`fas fa-paperclip text-gray-400 ${isLoading ? 'animate-spin' : ''}`} />
+                <i className="fas fa-paperclip" />
               </button>
-              
-              {/* Voice Input Toggle */}
+
+              {/* Voice */}
               <button
                 type="button"
                 onClick={toggleListening}
                 disabled={!isActive || !audioInitialized}
-                className={`p-2 glass rounded-lg border transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed ${
-                  isListening 
-                    ? 'border-cyber-green/50 text-cyber-green hover:bg-cyber-green/10 scale-110 animate-pulse'
-                    : isActive
-                    ? 'border-cyber-blue/50 text-cyber-blue hover:bg-cyber-blue/10'
-                    : 'border-gray-500 text-gray-400'
+                className={`p-1.5 rounded-lg text-xs border transition-all disabled:opacity-40 ${
+                  isListening
+                    ? "border-green-400/50 bg-green-400/10 text-green-400 animate-pulse"
+                    : "border-white/10 text-gray-500 hover:text-gray-300"
                 }`}
+                title={isListening ? "Stop listening" : "Voice input"}
                 data-testid="button-voice-input"
-                title={getVoiceButtonTooltip()}
               >
-                <i className={`fas fa-microphone ${isListening ? 'animate-pulse' : ''}`} />
+                <i className={`fas fa-microphone ${isListening ? "text-green-400" : ""}`} />
               </button>
-              
-              {/* Send Button */}
-              <Button
+
+              {/* Stream toggle */}
+              <button
+                type="button"
+                onClick={() => setUseStream(p => !p)}
+                className={`p-1.5 rounded-lg text-xs border transition-colors ${
+                  useStream
+                    ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-400"
+                    : "border-white/10 text-gray-500 hover:text-gray-300"
+                }`}
+                title={`Streaming: ${useStream ? "ON" : "OFF"}`}
+              >
+                <i className="fas fa-stream" />
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {/* Status text */}
+              <span className="text-xs font-mono text-gray-600 hidden md:block">
+                {isBusy ? (isStreaming ? "streaming..." : "thinking...") : "⏎ send · ⇧⏎ newline"}
+              </span>
+
+              {/* Send button */}
+              <button
                 type="submit"
-                disabled={!message.trim() || isLoading}
-                className="px-4 py-2 bg-gradient-to-r from-cyber-blue to-cyber-green text-black rounded-lg font-medium hover:shadow-lg hover:shadow-cyber-blue/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={!message.trim() || isBusy}
+                className="px-4 py-1.5 bg-gradient-to-r from-cyan-500 to-green-500 text-black font-bold text-xs font-mono rounded-lg hover:shadow-lg hover:shadow-cyan-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
                 data-testid="button-send"
               >
-                {isLoading ? (
-                  <i className="fas fa-spinner animate-spin" />
+                {isBusy ? (
+                  <><div className="w-3 h-3 border border-black/40 border-t-black rounded-full animate-spin" /> {isStreaming ? "STREAMING" : "THINKING"}</>
                 ) : (
-                  <>
-                    <i className="fas fa-paper-plane mr-2" />
-                    Send
-                  </>
+                  <><i className="fas fa-paper-plane" /> SEND</>
                 )}
-              </Button>
-            </div>
-          </div>
-          
-          {/* Status Bar */}
-          <div className="flex items-center justify-between mt-3 pt-3 border-t border-white/10">
-            <div className="flex items-center space-x-3 text-xs text-gray-400">
-              <span>⌘K for commands</span>
-              <span>•</span>
-              <span>⌘U to upload</span>
-              <span>•</span>
-              <span>Voice: {isActive ? 'Say "Hey Ammu"' : 'Disabled'}</span>
-            </div>
-            <div className="flex items-center space-x-2 text-xs">
-              {/* Emotional State Indicator */}
-              <div className="flex items-center space-x-1">
-                <i className="fas fa-heart text-pink-400" />
-                <span className="text-gray-400">
-                  Bond: <span className="text-pink-400">{emotionalState.bondLevel}%</span>
-                </span>
-              </div>
-              <div className="text-gray-400">•</div>
-              <div className="flex items-center space-x-1">
-                <div className={`w-2 h-2 rounded-full ${
-                  isListening ? 'bg-cyber-green animate-pulse' : 
-                  isActive ? 'bg-cyber-blue' : 'bg-gray-500'
-                }`} />
-                <span className={isListening ? 'text-cyber-green' : isActive ? 'text-cyber-blue' : 'text-gray-400'}>
-                  {isListening ? 'Listening' : isActive ? 'Voice Ready' : 'Voice Off'}
-                </span>
-              </div>
+              </button>
             </div>
           </div>
         </div>
       </form>
-      
+
       <input
         ref={fileInputRef}
         type="file"
         accept=".pdf,.md,.txt,.log,.png,.jpg,.jpeg,.json,.csv"
         className="hidden"
-        onChange={handleFileInputChange}
-        multiple={false}
+        onChange={(e) => { handleFileUpload(e.target.files); e.target.value = ""; }}
       />
     </div>
   );

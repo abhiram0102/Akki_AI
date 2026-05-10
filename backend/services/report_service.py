@@ -1,0 +1,472 @@
+"""
+AKKI Report Generation Engine
+Generates professional PDF and DOCX security reports.
+"""
+import io
+import json
+from datetime import datetime, timezone
+from typing import Optional
+
+
+def generate_pdf_report(report_data: dict) -> bytes:
+    """Generate a professional PDF security report using ReportLab."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4, letter
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch, cm
+        from reportlab.platypus import (
+            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+            HRFlowable, PageBreak
+        )
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT, TA_JUSTIFY
+        from reportlab.platypus import KeepTogether
+    except ImportError:
+        return b"PDF generation requires reportlab package"
+
+    buf = io.BytesIO()
+
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=letter,
+        rightMargin=0.75 * inch,
+        leftMargin=0.75 * inch,
+        topMargin=1 * inch,
+        bottomMargin=0.75 * inch,
+        title=report_data.get("title", "Security Report"),
+    )
+
+    # Color palette
+    DARK_BG = colors.HexColor("#0d1117")
+    CYBER_BLUE = colors.HexColor("#00bfff")
+    CYBER_GREEN = colors.HexColor("#39ff14")
+    CYBER_RED = colors.HexColor("#ff4444")
+    CYBER_AMBER = colors.HexColor("#ffaa00")
+    GRAY_LIGHT = colors.HexColor("#e6edf3")
+    GRAY_MED = colors.HexColor("#8b949e")
+    BORDER_COLOR = colors.HexColor("#21262d")
+    CRITICAL_COLOR = colors.HexColor("#da3633")
+    HIGH_COLOR = colors.HexColor("#d29922")
+    MEDIUM_COLOR = colors.HexColor("#388bfd")
+    LOW_COLOR = colors.HexColor("#3fb950")
+
+    SEVERITY_COLORS = {
+        "critical": CRITICAL_COLOR,
+        "high": HIGH_COLOR,
+        "medium": MEDIUM_COLOR,
+        "low": LOW_COLOR,
+        "info": GRAY_MED,
+    }
+
+    styles = getSampleStyleSheet()
+
+    # Custom styles
+    title_style = ParagraphStyle(
+        "CyberTitle",
+        parent=styles["Title"],
+        fontSize=28,
+        textColor=GRAY_LIGHT,
+        spaceAfter=8,
+        fontName="Helvetica-Bold",
+        alignment=TA_LEFT,
+    )
+
+    subtitle_style = ParagraphStyle(
+        "CyberSubtitle",
+        parent=styles["Normal"],
+        fontSize=13,
+        textColor=CYBER_BLUE,
+        spaceAfter=4,
+        fontName="Helvetica",
+    )
+
+    h1_style = ParagraphStyle(
+        "CyberH1",
+        parent=styles["Heading1"],
+        fontSize=16,
+        textColor=CYBER_BLUE,
+        spaceBefore=20,
+        spaceAfter=8,
+        fontName="Helvetica-Bold",
+        borderPad=4,
+    )
+
+    h2_style = ParagraphStyle(
+        "CyberH2",
+        parent=styles["Heading2"],
+        fontSize=13,
+        textColor=GRAY_LIGHT,
+        spaceBefore=12,
+        spaceAfter=6,
+        fontName="Helvetica-Bold",
+    )
+
+    body_style = ParagraphStyle(
+        "CyberBody",
+        parent=styles["Normal"],
+        fontSize=10,
+        textColor=colors.HexColor("#c9d1d9"),
+        spaceAfter=6,
+        leading=16,
+        fontName="Helvetica",
+    )
+
+    code_style = ParagraphStyle(
+        "CyberCode",
+        parent=styles["Normal"],
+        fontSize=9,
+        textColor=CYBER_GREEN,
+        fontName="Courier",
+        backColor=colors.HexColor("#161b22"),
+        borderPad=6,
+        spaceAfter=8,
+    )
+
+    meta_style = ParagraphStyle(
+        "CyberMeta",
+        parent=styles["Normal"],
+        fontSize=9,
+        textColor=GRAY_MED,
+        fontName="Helvetica",
+        spaceAfter=3,
+    )
+
+    story = []
+
+    title = report_data.get("title", "Security Assessment Report")
+    report_type = report_data.get("type", "technical").upper()
+    now = datetime.now(timezone.utc).strftime("%B %d, %Y")
+    report_id = report_data.get("id", "N/A")
+
+    # ── COVER SECTION ────────────────────────────────────────────────────────
+    story.append(Spacer(1, 0.4 * inch))
+    story.append(Paragraph("AKKI AI", subtitle_style))
+    story.append(Paragraph("CYBERSECURITY COMMAND CENTER", ParagraphStyle(
+        "banner", parent=subtitle_style, fontSize=10, textColor=GRAY_MED
+    )))
+    story.append(Spacer(1, 0.3 * inch))
+    story.append(HRFlowable(width="100%", thickness=2, color=CYBER_BLUE))
+    story.append(Spacer(1, 0.2 * inch))
+    story.append(Paragraph(title.upper(), title_style))
+    story.append(Paragraph(f"{report_type} SECURITY ASSESSMENT", ParagraphStyle(
+        "rtype", parent=subtitle_style, fontSize=14, textColor=CYBER_AMBER
+    )))
+    story.append(Spacer(1, 0.3 * inch))
+    story.append(HRFlowable(width="100%", thickness=1, color=BORDER_COLOR))
+    story.append(Spacer(1, 0.2 * inch))
+
+    # Meta table
+    meta_data = [
+        ["Report Date:", now],
+        ["Report ID:", str(report_id)[:32]],
+        ["Classification:", "CONFIDENTIAL"],
+        ["Generated By:", "AKKI AI Cybersecurity Platform"],
+    ]
+    meta_table = Table(meta_data, colWidths=[1.5 * inch, 5 * inch])
+    meta_table.setStyle(TableStyle([
+        ("TEXTCOLOR", (0, 0), (0, -1), CYBER_BLUE),
+        ("TEXTCOLOR", (1, 0), (1, -1), GRAY_LIGHT),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(meta_table)
+    story.append(Spacer(1, 0.3 * inch))
+
+    # ── RISK SUMMARY BOX ─────────────────────────────────────────────────────
+    summary = report_data.get("summary", {})
+    if summary:
+        risk_level = summary.get("overallRisk", "medium").upper()
+        risk_score = summary.get("riskScore", 0)
+        risk_color = {"HIGH": HIGH_COLOR, "CRITICAL": CRITICAL_COLOR, "MEDIUM": MEDIUM_COLOR, "LOW": LOW_COLOR}.get(risk_level, MEDIUM_COLOR)
+
+        risk_data = [
+            ["OVERALL RISK", "RISK SCORE", "CRITICAL", "HIGH", "MEDIUM", "LOW"],
+            [
+                risk_level,
+                f"{risk_score}/100",
+                str(summary.get("criticalCount", 0)),
+                str(summary.get("highCount", 0)),
+                str(summary.get("mediumCount", 0)),
+                str(summary.get("lowCount", 0)),
+            ],
+        ]
+        risk_table = Table(risk_data, colWidths=[1.1 * inch] * 6)
+        risk_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#161b22")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), CYBER_BLUE),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 8),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BACKGROUND", (0, 1), (0, 1), risk_color),
+            ("TEXTCOLOR", (0, 1), (0, 1), colors.white),
+            ("FONTNAME", (0, 1), (0, 1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 1), (0, 1), 14),
+            ("BACKGROUND", (1, 1), (1, 1), colors.HexColor("#1c2128")),
+            ("TEXTCOLOR", (1, 1), (1, 1), CYBER_AMBER),
+            ("FONTNAME", (1, 1), (1, 1), "Helvetica-Bold"),
+            ("FONTSIZE", (1, 1), (1, 1), 14),
+            ("TEXTCOLOR", (2, 1), (2, 1), CRITICAL_COLOR),
+            ("TEXTCOLOR", (3, 1), (3, 1), HIGH_COLOR),
+            ("TEXTCOLOR", (4, 1), (4, 1), MEDIUM_COLOR),
+            ("TEXTCOLOR", (5, 1), (5, 1), LOW_COLOR),
+            ("FONTNAME", (2, 1), (-1, 1), "Helvetica-Bold"),
+            ("FONTSIZE", (2, 1), (-1, 1), 14),
+            ("BACKGROUND", (2, 1), (-1, 1), colors.HexColor("#1c2128")),
+            ("GRID", (0, 0), (-1, -1), 1, BORDER_COLOR),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.append(risk_table)
+        story.append(Spacer(1, 0.3 * inch))
+
+    # ── EXECUTIVE SUMMARY ────────────────────────────────────────────────────
+    exec_summary = report_data.get("executiveSummary", "")
+    if exec_summary:
+        story.append(Paragraph("EXECUTIVE SUMMARY", h1_style))
+        story.append(HRFlowable(width="100%", thickness=1, color=CYBER_BLUE))
+        story.append(Spacer(1, 0.1 * inch))
+        story.append(Paragraph(exec_summary, body_style))
+        story.append(Spacer(1, 0.2 * inch))
+
+    # ── SCOPE & METHODOLOGY ──────────────────────────────────────────────────
+    scope = report_data.get("scope", "")
+    methodology = report_data.get("methodology", "")
+    if scope or methodology:
+        story.append(Paragraph("SCOPE & METHODOLOGY", h1_style))
+        story.append(HRFlowable(width="100%", thickness=1, color=CYBER_BLUE))
+        story.append(Spacer(1, 0.1 * inch))
+        if scope:
+            story.append(Paragraph("<b>Scope:</b>", h2_style))
+            story.append(Paragraph(scope, body_style))
+        if methodology:
+            story.append(Paragraph("<b>Methodology:</b>", h2_style))
+            story.append(Paragraph(methodology, body_style))
+        story.append(Spacer(1, 0.2 * inch))
+
+    # ── FINDINGS ─────────────────────────────────────────────────────────────
+    findings = report_data.get("findings", [])
+    if findings:
+        story.append(PageBreak())
+        story.append(Paragraph("FINDINGS", h1_style))
+        story.append(HRFlowable(width="100%", thickness=1, color=CYBER_BLUE))
+        story.append(Spacer(1, 0.15 * inch))
+
+        for i, finding in enumerate(findings):
+            severity = finding.get("severity", "medium").lower()
+            sev_color = SEVERITY_COLORS.get(severity, MEDIUM_COLOR)
+
+            finding_elements = []
+
+            # Finding header row
+            header_data = [[
+                f"[F-{i+1:03d}]  {finding.get('title', 'Finding')}",
+                severity.upper()
+            ]]
+            header_table = Table(header_data, colWidths=[5.5 * inch, 1 * inch])
+            header_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#1c2128")),
+                ("BACKGROUND", (1, 0), (1, 0), sev_color),
+                ("TEXTCOLOR", (0, 0), (0, 0), GRAY_LIGHT),
+                ("TEXTCOLOR", (1, 0), (1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (0, 0), 11),
+                ("FONTSIZE", (1, 0), (1, 0), 9),
+                ("ALIGN", (1, 0), (1, 0), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("LEFTPADDING", (0, 0), (0, 0), 12),
+            ]))
+            finding_elements.append(header_table)
+
+            # Finding details
+            details = []
+            if finding.get("category"):
+                details.append(Paragraph(f"<b>Category:</b> {finding['category']}", meta_style))
+            if finding.get("mitreTechnique"):
+                details.append(Paragraph(f"<b>MITRE:</b> {finding['mitreTechnique']}", meta_style))
+            if finding.get("cvss"):
+                details.append(Paragraph(f"<b>CVSS:</b> {finding['cvss']}", meta_style))
+            if finding.get("cve"):
+                details.append(Paragraph(f"<b>CVE:</b> {finding['cve']}", meta_style))
+
+            if details:
+                finding_elements.extend(details)
+
+            if finding.get("description"):
+                finding_elements.append(Paragraph(f"<b>Description:</b>", body_style))
+                finding_elements.append(Paragraph(finding["description"], body_style))
+
+            if finding.get("recommendation"):
+                finding_elements.append(Paragraph(f"<b>Recommendation:</b>", ParagraphStyle(
+                    "rec", parent=body_style, textColor=CYBER_GREEN
+                )))
+                finding_elements.append(Paragraph(finding["recommendation"], body_style))
+
+            finding_elements.append(HRFlowable(width="100%", thickness=0.5, color=BORDER_COLOR))
+            finding_elements.append(Spacer(1, 0.15 * inch))
+
+            story.extend(finding_elements)
+
+    # ── MITRE ATT&CK MAPPING ─────────────────────────────────────────────────
+    mitre = report_data.get("mitreMapping", [])
+    if mitre:
+        story.append(PageBreak())
+        story.append(Paragraph("MITRE ATT&CK MAPPING", h1_style))
+        story.append(HRFlowable(width="100%", thickness=1, color=CYBER_BLUE))
+        story.append(Spacer(1, 0.15 * inch))
+
+        mitre_data = [["TACTIC", "TACTIC ID", "TECHNIQUES"]]
+        for entry in mitre:
+            mitre_data.append([
+                entry.get("tactic", ""),
+                entry.get("tacticId", ""),
+                ", ".join(entry.get("techniques", [])),
+            ])
+
+        mitre_table = Table(mitre_data, colWidths=[2 * inch, 1.2 * inch, 3.3 * inch])
+        mitre_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#161b22")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), CYBER_BLUE),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("TEXTCOLOR", (0, 1), (-1, -1), GRAY_LIGHT),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("GRID", (0, 0), (-1, -1), 1, BORDER_COLOR),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#1c2128"), colors.HexColor("#161b22")]),
+            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.append(mitre_table)
+        story.append(Spacer(1, 0.3 * inch))
+
+    # ── RECOMMENDATIONS ──────────────────────────────────────────────────────
+    recs = report_data.get("recommendations", [])
+    if recs:
+        story.append(Paragraph("RECOMMENDATIONS", h1_style))
+        story.append(HRFlowable(width="100%", thickness=1, color=CYBER_BLUE))
+        story.append(Spacer(1, 0.1 * inch))
+
+        for i, rec in enumerate(recs):
+            story.append(Paragraph(f"{i+1}. {rec}", body_style))
+
+        story.append(Spacer(1, 0.3 * inch))
+
+    # ── TECHNICAL DETAILS ────────────────────────────────────────────────────
+    tech_details = report_data.get("technicalDetails", "")
+    if tech_details:
+        story.append(Paragraph("TECHNICAL DETAILS", h1_style))
+        story.append(HRFlowable(width="100%", thickness=1, color=CYBER_BLUE))
+        story.append(Spacer(1, 0.1 * inch))
+        story.append(Paragraph(tech_details, body_style))
+        story.append(Spacer(1, 0.2 * inch))
+
+    # ── FOOTER ───────────────────────────────────────────────────────────────
+    story.append(Spacer(1, 0.5 * inch))
+    story.append(HRFlowable(width="100%", thickness=1, color=BORDER_COLOR))
+    story.append(Spacer(1, 0.1 * inch))
+    story.append(Paragraph(
+        "This report was generated by AKKI AI Cybersecurity Platform. "
+        "All findings are for authorized security testing purposes only. "
+        f"Generated: {now} | CONFIDENTIAL",
+        ParagraphStyle("footer", parent=meta_style, alignment=TA_CENTER)
+    ))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def generate_docx_report(report_data: dict) -> bytes:
+    """Generate a professional DOCX security report."""
+    try:
+        from docx import Document as DocxDocument
+        from docx.shared import Pt, RGBColor, Inches, Cm
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+    except ImportError:
+        return b"DOCX generation requires python-docx package"
+
+    doc = DocxDocument()
+
+    # Page margins
+    section = doc.sections[0]
+    section.left_margin = Inches(1)
+    section.right_margin = Inches(1)
+    section.top_margin = Inches(1)
+    section.bottom_margin = Inches(1)
+
+    title = report_data.get("title", "Security Assessment Report")
+    report_type = report_data.get("type", "technical").upper()
+    now = datetime.now(timezone.utc).strftime("%B %d, %Y")
+
+    # Title
+    h = doc.add_heading(title.upper(), 0)
+    h.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    run = h.runs[0]
+    run.font.color.rgb = RGBColor(0x00, 0xBF, 0xFF)
+    run.font.size = Pt(24)
+
+    doc.add_paragraph(f"{report_type} SECURITY ASSESSMENT | {now} | CONFIDENTIAL")
+
+    doc.add_paragraph("─" * 60)
+
+    # Summary
+    summary = report_data.get("summary", {})
+    if summary:
+        doc.add_heading("RISK SUMMARY", 1)
+        p = doc.add_paragraph()
+        p.add_run(f"Overall Risk: {summary.get('overallRisk', 'N/A').upper()} | "
+                  f"Score: {summary.get('riskScore', 0)}/100 | "
+                  f"Critical: {summary.get('criticalCount', 0)} | "
+                  f"High: {summary.get('highCount', 0)} | "
+                  f"Medium: {summary.get('mediumCount', 0)} | "
+                  f"Low: {summary.get('lowCount', 0)}")
+
+    # Executive Summary
+    exec_summary = report_data.get("executiveSummary", "")
+    if exec_summary:
+        doc.add_heading("EXECUTIVE SUMMARY", 1)
+        doc.add_paragraph(exec_summary)
+
+    # Findings
+    findings = report_data.get("findings", [])
+    if findings:
+        doc.add_heading("FINDINGS", 1)
+        for i, finding in enumerate(findings):
+            severity = finding.get("severity", "medium").upper()
+            doc.add_heading(f"[F-{i+1:03d}] {finding.get('title', 'Finding')} — {severity}", 2)
+            if finding.get("description"):
+                doc.add_paragraph(f"Description: {finding['description']}")
+            if finding.get("recommendation"):
+                doc.add_paragraph(f"Recommendation: {finding['recommendation']}")
+            if finding.get("mitreTechnique"):
+                doc.add_paragraph(f"MITRE: {finding['mitreTechnique']}")
+
+    # Recommendations
+    recs = report_data.get("recommendations", [])
+    if recs:
+        doc.add_heading("RECOMMENDATIONS", 1)
+        for i, rec in enumerate(recs):
+            doc.add_paragraph(f"{i+1}. {rec}")
+
+    # Technical Details
+    tech_details = report_data.get("technicalDetails", "")
+    if tech_details:
+        doc.add_heading("TECHNICAL DETAILS", 1)
+        doc.add_paragraph(tech_details)
+
+    # Footer
+    doc.add_paragraph("─" * 60)
+    doc.add_paragraph(f"Generated by AKKI AI Cybersecurity Platform | {now} | CONFIDENTIAL")
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()

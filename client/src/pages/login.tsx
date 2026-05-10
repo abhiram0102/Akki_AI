@@ -32,7 +32,7 @@ function ClientOnlyLogin() {
         await register(formData.email, formData.username, formData.password);
         toast({
           title: "Registration successful",
-          description: "Welcome to AI Copilot!"
+          description: "Welcome to AKKI AI!"
         });
       } else {
         await login(formData.email, formData.password);
@@ -61,10 +61,10 @@ function ClientOnlyLogin() {
           <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gradient-to-br from-cyber-blue to-cyber-green flex items-center justify-center">
             <i className="fas fa-brain text-white text-2xl" />
           </div>
-          <CardTitle className="text-2xl font-bold text-white">
-            AI Copilot
+          <CardTitle className="text-2xl font-bold text-white font-display tracking-wider">
+            AKKI AI
           </CardTitle>
-          <p className="text-gray-400">Cybersecurity Command Center</p>
+          <p className="text-cyan-400 text-xs font-mono tracking-widest uppercase">Autonomous Cybersecurity OS</p>
         </CardHeader>
         
         <CardContent>

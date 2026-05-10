@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, update
@@ -15,8 +15,11 @@ from sqlalchemy import select, desc, update
 from backend.database import get_db, init_db
 from backend.models import User, Session, Message, Document, Memory, ToolRun, Finding, VoiceInteraction, WorkspaceRecord
 from backend.auth import hash_password, verify_password, create_access_token, get_current_user
-from backend.services.ai_service import ai_service, AIQuotaError
+from backend.services.ai_service import ai_service, AIQuotaError, AGENT_PERSONAS
 from backend.services.agent_service import agent_service
+from backend.services.tool_service import run_tool
+from backend.services.tutor_service import tutor_service
+from backend.services.report_service import generate_pdf_report, generate_docx_report
 
 
 @asynccontextmanager
@@ -118,6 +121,31 @@ class ReportFindingsRequest(BaseModel):
     findings: List[dict]
     executiveSummary: Optional[str] = None
     scope: Optional[str] = None
+
+class ToolExecuteRequest(BaseModel):
+    toolName: str
+    params: dict
+
+class TutorQuizRequest(BaseModel):
+    topic: str
+    difficulty: Optional[int] = 3
+
+class TutorExplainRequest(BaseModel):
+    topic: str
+    level: Optional[str] = "intermediate"
+
+class TutorChallengeRequest(BaseModel):
+    topic: str
+    difficulty: Optional[int] = 3
+
+class TutorPathRequest(BaseModel):
+    goals: str
+    currentLevel: Optional[str] = "beginner"
+
+class StreamChatRequest(BaseModel):
+    content: str
+    sessionId: Optional[str] = None
+    agent: Optional[str] = None
 
 
 def user_to_dict(user: User, include_password: bool = False) -> dict:
@@ -414,9 +442,17 @@ async def chat_message(
 
     return {
         "userMessage": message_to_dict(user_msg),
-        "assistantMessage": message_to_dict(assistant_msg),
+        "assistantMessage": {
+            **message_to_dict(assistant_msg),
+            "agent": agent_response.get("agent", "planner"),
+            "agentName": agent_response.get("agentName", "NEXUS"),
+            "agentRole": agent_response.get("agentRole", "Orchestration"),
+            "agentColor": agent_response.get("agentColor", "cyber-blue"),
+            "toolCalls": agent_response.get("toolCalls", []),
+        },
         "sessionId": session_id,
         "agentPlan": agent_response.get("plan"),
+        "agent": agent_response.get("agent", "planner"),
     }
 
 
@@ -1425,9 +1461,161 @@ async def get_findings(
     return db_findings + baseline
 
 
-# ── Vite dev-server proxy (catch-all) ─────────────────────────────────────────
-# Forwards every non-/api request to the Vite dev server so the webview on
-# port 5000 shows the React frontend while the API stays on the same port.
+# ── Agents ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/agents")
+async def get_agents():
+    """Return all registered specialist agents and their status."""
+    return [
+        {
+            "id": agent_id,
+            "name": info["name"],
+            "role": info["role"],
+            "color": info["color"],
+            "status": "active",
+            "description": info["system"][:200] + "...",
+        }
+        for agent_id, info in AGENT_PERSONAS.items()
+    ]
+
+
+# ── Streaming Chat ─────────────────────────────────────────────────────────────
+
+@app.post("/api/chat/stream")
+async def stream_chat(
+    body: StreamChatRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Server-Sent Events streaming chat endpoint."""
+    import json as _json
+
+    async def event_generator():
+        # Route to agent first
+        try:
+            routing = await ai_service.route_to_agent(body.content)
+            agent_key = body.agent or routing.get("agent", "planner")
+            agent_info = AGENT_PERSONAS.get(agent_key, AGENT_PERSONAS["planner"])
+
+            # Send agent info event
+            yield f"data: {_json.dumps({'type': 'agent', 'agent': agent_key, 'agentName': agent_info['name'], 'agentRole': agent_info['role']})}\n\n"
+
+            # Stream content
+            async for chunk in ai_service.stream_completion(
+                [{"role": "user", "content": body.content}],
+                agent=agent_key,
+            ):
+                yield f"data: {_json.dumps({'type': 'token', 'text': chunk})}\n\n"
+
+            yield f"data: {_json.dumps({'type': 'done'})}\n\n"
+
+        except Exception as e:
+            yield f"data: {_json.dumps({'type': 'error', 'message': str(e)[:200]})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Real Tool Execution ────────────────────────────────────────────────────────
+
+@app.post("/api/tools/execute")
+async def execute_tool(
+    body: ToolExecuteRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Execute a real cybersecurity tool and return structured results."""
+    result = await run_tool(body.toolName, body.params)
+    return result
+
+
+# ── Tutoring Engine ────────────────────────────────────────────────────────────
+
+@app.get("/api/tutor/paths")
+async def get_learning_paths():
+    return await tutor_service.get_learning_paths()
+
+
+@app.post("/api/tutor/quiz")
+async def get_quiz(body: TutorQuizRequest):
+    return await tutor_service.get_quiz(body.topic, body.difficulty)
+
+
+@app.post("/api/tutor/explain")
+async def explain_topic(body: TutorExplainRequest):
+    explanation = await tutor_service.explain_topic(body.topic, body.level)
+    return {"topic": body.topic, "level": body.level, "explanation": explanation}
+
+
+@app.post("/api/tutor/challenge")
+async def generate_challenge(body: TutorChallengeRequest):
+    return await tutor_service.generate_challenge(body.topic, body.difficulty)
+
+
+@app.post("/api/tutor/path")
+async def generate_learning_path(body: TutorPathRequest):
+    return await tutor_service.generate_learning_path(body.goals, body.currentLevel)
+
+
+# ── Report Downloads (PDF / DOCX) ──────────────────────────────────────────────
+
+@app.get("/api/reports/{report_id}/download/pdf")
+async def download_report_pdf(
+    report_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(WorkspaceRecord).where(
+            WorkspaceRecord.id == report_id,
+            WorkspaceRecord.workspace == "reports",
+        )
+    )
+    rec = result.scalar_one_or_none()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    report_data = {"id": report_id, **rec.data}
+    pdf_bytes = generate_pdf_report(report_data)
+    title_slug = rec.title.replace(" ", "_").replace("/", "-")[:50]
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="AKKI_{title_slug}.pdf"'},
+    )
+
+
+@app.get("/api/reports/{report_id}/download/docx")
+async def download_report_docx(
+    report_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(WorkspaceRecord).where(
+            WorkspaceRecord.id == report_id,
+            WorkspaceRecord.workspace == "reports",
+        )
+    )
+    rec = result.scalar_one_or_none()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    report_data = {"id": report_id, **rec.data}
+    docx_bytes = generate_docx_report(report_data)
+    title_slug = rec.title.replace(" ", "_").replace("/", "-")[:50]
+
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="AKKI_{title_slug}.docx"'},
+    )
+
+
+# ── port 5000 shows the React frontend while the API stays on the same port.
 
 import httpx
 
