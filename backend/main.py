@@ -364,6 +364,19 @@ async def update_profile(
     return user_to_dict(current_user)
 
 
+# ── Profile: emotional-state sub-route ────────────────────────────────────────
+
+@app.get("/api/protected/profile/emotional-state")
+async def get_emotional_state(current_user: User = Depends(get_current_user)):
+    return {"emotionalState": current_user.emotional_state or {
+        "bondLevel": 0,
+        "currentMood": "neutral",
+        "trustLevel": 0.5,
+        "personalityTraits": [],
+        "preferredCommunicationStyle": "professional"
+    }}
+
+
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/protected/sessions")
@@ -640,6 +653,29 @@ async def generate_report_protected(body: ReportFindingsRequest, current_user: U
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
 TOOL_RISK = {"nmap": "high", "whois": "low", "dns_lookup": "low", "port_scan": "medium"}
+
+@app.get("/api/protected/tools/pending")
+async def get_pending_tools(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(ToolRun).where(
+            ToolRun.status == "pending",
+            ToolRun.approval_required == True,
+        ).order_by(desc(ToolRun.created_at)).limit(20)
+    )
+    runs = result.scalars().all()
+    return [
+        {
+            "id": r.id,
+            "toolName": r.tool_name,
+            "arguments": r.arguments,
+            "riskLevel": r.risk_level,
+        }
+        for r in runs
+    ]
+
 
 @app.post("/api/protected/tools/execute")
 async def execute_tool(
@@ -1717,6 +1753,12 @@ VITE_URL = "http://localhost:5173"
 
 @app.api_route("/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def vite_proxy(path: str, request: Request):
+    # Never forward /api/ paths to Vite — they belong to this server.
+    # Returning 404 here prevents a circular proxy loop where Vite would
+    # bounce unknown /api/ requests right back to FastAPI.
+    if path.startswith("api/"):
+        raise HTTPException(status_code=404, detail=f"API route not found: /{path}")
+
     url = f"{VITE_URL}/{path}"
     query = request.url.query
     if query:
@@ -1727,16 +1769,19 @@ async def vite_proxy(path: str, request: Request):
         if k.lower() not in ("host", "content-length")
     }
 
+    # Read the body once so we can reuse it in retries
+    body = await request.body()
+
+    _timeout_errors = (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException)
+
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            body = await request.body()
             resp = await client.request(
                 method=request.method,
                 url=url,
                 headers=headers,
                 content=body,
             )
-            # Forward response headers except ones that break streaming
             resp_headers = {
                 k: v for k, v in resp.headers.items()
                 if k.lower() not in ("transfer-encoding", "content-encoding")
@@ -1746,10 +1791,10 @@ async def vite_proxy(path: str, request: Request):
                 status_code=resp.status_code,
                 headers=resp_headers,
             )
-    except (httpx.ConnectError, httpx.ReadTimeout):
+    except _timeout_errors:
         # Vite may still be starting — retry a few times before giving up
-        for _ in range(8):
-            import asyncio
+        import asyncio
+        for _ in range(5):
             await asyncio.sleep(0.5)
             try:
                 async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as retry_client:
@@ -1757,14 +1802,14 @@ async def vite_proxy(path: str, request: Request):
                         method=request.method,
                         url=url,
                         headers=headers,
-                        content=await request.body(),
+                        content=body,
                     )
                     resp_headers = {
                         k: v for k, v in resp.headers.items()
                         if k.lower() not in ("transfer-encoding", "content-encoding")
                     }
                     return Response(content=resp.content, status_code=resp.status_code, headers=resp_headers)
-            except (httpx.ConnectError, httpx.ReadTimeout):
+            except _timeout_errors:
                 continue
         return Response(
             content=b"<html><body><h2>Starting up...</h2><p>The frontend is initialising. Please refresh in a moment.</p><script>setTimeout(()=>location.reload(),2000)</script></body></html>",
