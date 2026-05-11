@@ -9,7 +9,14 @@ from sqlalchemy import select
 from backend.database import get_db
 from backend.models import User
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "ammu-ai-cybersecurity-secret-key-2024")
+_raw_secret = os.environ.get("JWT_SECRET", "")
+if not _raw_secret:
+    raise RuntimeError(
+        "JWT_SECRET environment variable is not set. "
+        "Set a strong random secret (≥32 chars) before starting the server."
+    )
+JWT_SECRET: str = _raw_secret
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 7
 

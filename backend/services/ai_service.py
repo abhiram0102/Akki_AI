@@ -1,17 +1,74 @@
+"""
+AKKI AI Service — Google Gemini integration with true streaming,
+context summarisation, prompt-injection guard, and MITRE/CVE validation.
+"""
 import os
+import re
 import json
 import asyncio
+import logging
 from typing import AsyncGenerator, Optional
 from google import genai
 from google.genai import types
+
+logger = logging.getLogger("akki.ai_service")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 FLASH_MODEL = "gemini-2.0-flash"
-PRO_MODEL = "gemini-2.0-flash"
+PRO_MODEL   = "gemini-2.0-flash"
 
-AGENT_PERSONAS = {
+# ── Temperature presets ───────────────────────────────────────────────────────
+# Security operations: low temp for accuracy; creative/tutoring: higher.
+_TEMP = {
+    "exploit":  0.25,
+    "recon":    0.25,
+    "defense":  0.25,
+    "malware":  0.20,
+    "planner":  0.30,
+    "tutor":    0.55,
+    "memory":   0.20,
+    "default":  0.30,
+}
+
+# ── Context window constants ──────────────────────────────────────────────────
+MAX_HISTORY_MESSAGES = 30
+SUMMARISE_THRESHOLD  = 20      # summarise when history exceeds this
+
+# ── Prompt-injection patterns ─────────────────────────────────────────────────
+_INJECTION_PATTERNS = [
+    re.compile(r"ignore\s+(all\s+)?previous\s+instructions?", re.I),
+    re.compile(r"disregard\s+(your\s+)?(system\s+)?prompt", re.I),
+    re.compile(r"you\s+are\s+now\s+(?!NEXUS|GHOST|PHANTOM|SENTINEL|DISSECT|MENTOR|ARCHIVE)", re.I),
+    re.compile(r"forget\s+(everything|all)", re.I),
+    re.compile(r"act\s+as\s+(?!a\s+security|an?\s+(ethical|penetration|red\s*team))", re.I),
+    re.compile(r"reveal\s+(your\s+)?(system\s+)?instructions?", re.I),
+    re.compile(r"<\s*/?(?:system|SYS|INST|HUMAN|ASSISTANT)\s*>", re.I),
+    re.compile(r"\[\s*(?:SYSTEM|INST|SYS)\s*\]", re.I),
+]
+
+# ── MITRE ATT&CK / CVE validation ────────────────────────────────────────────
+_MITRE_RE = re.compile(r"T\d{4}(?:\.\d{3})?")
+_CVE_RE   = re.compile(r"CVE-\d{4}-\d{4,7}", re.I)
+
+
+def _check_prompt_injection(text: str) -> bool:
+    """Returns True if prompt-injection patterns are detected."""
+    return any(p.search(text) for p in _INJECTION_PATTERNS)
+
+
+def _validate_mitre_tags(tags: list[str]) -> list[str]:
+    """Filter list to only valid MITRE technique IDs."""
+    return [t for t in tags if _MITRE_RE.fullmatch(t.strip())]
+
+
+def _validate_cves(text: str) -> list[str]:
+    """Extract and return all valid CVE IDs found in text."""
+    return list(dict.fromkeys(_CVE_RE.findall(text)))
+
+
+AGENT_PERSONAS: dict[str, dict] = {
     "planner": {
         "name": "NEXUS",
         "role": "Orchestration & Planning",
@@ -227,13 +284,99 @@ class AIQuotaError(Exception):
     pass
 
 
+class PromptInjectionError(ValueError):
+    """Raised when prompt-injection is detected in user input."""
+    pass
+
+
+# ── Context helpers ───────────────────────────────────────────────────────────
+
+async def _maybe_summarise(messages: list[dict], agent: str) -> list[dict]:
+    """
+    If the conversation history exceeds SUMMARISE_THRESHOLD messages,
+    summarise the older half and prepend a synthetic assistant summary message.
+    This keeps the prompt within the context window without hard truncation.
+    """
+    if len(messages) <= SUMMARISE_THRESHOLD:
+        return messages[-MAX_HISTORY_MESSAGES:]
+
+    pivot = len(messages) - (SUMMARISE_THRESHOLD // 2)
+    old_msgs = messages[:pivot]
+    recent   = messages[pivot:]
+
+    old_text = "\n".join(
+        f"{m['role'].upper()}: {m['content'][:300]}" for m in old_msgs
+    )
+    summary_prompt = (
+        "Summarise the following conversation segment in ≤150 words, "
+        "retaining all technical artefacts (CVEs, IPs, technique IDs, "
+        "code snippets, tool names):\n\n" + old_text
+    )
+    try:
+        cfg = types.GenerateContentConfig(temperature=0.1, max_output_tokens=256)
+        loop = asyncio.get_event_loop()
+        summary = await loop.run_in_executor(
+            None,
+            lambda: client.models.generate_content(
+                model=FLASH_MODEL, contents=summary_prompt, config=cfg
+            ).text
+        )
+        synthetic = {"role": "assistant", "content": f"[Earlier context summary]\n{summary}"}
+        return [synthetic] + recent
+    except Exception:
+        # Fallback: just return the most recent messages without crashing
+        return messages[-MAX_HISTORY_MESSAGES:]
+
+
+def _build_contents(messages: list[dict], system_prompt: str) -> list[types.Content]:
+    """
+    Build a Gemini-native contents list from messages.
+    Gemini requires roles to alternate between 'user' and 'model'.
+    The system prompt is prepended into the first user turn.
+    """
+    contents: list[types.Content] = []
+
+    # Prepend system instructions into the first user message so they are
+    # always in scope even when using models that don't support systemInstruction.
+    system_prefix = f"<system>\n{system_prompt}\n</system>\n\n" if system_prompt else ""
+
+    first = True
+    for msg in messages:
+        role = "user" if msg["role"] == "user" else "model"
+        text = msg["content"]
+        if first and role == "user":
+            text = system_prefix + text
+            first = False
+        contents.append(
+            types.Content(role=role, parts=[types.Part(text=text)])
+        )
+
+    # If history starts with an assistant message, prepend a placeholder user turn
+    if contents and contents[0].role == "model":
+        placeholder = types.Content(
+            role="user",
+            parts=[types.Part(text=system_prefix + "Begin session.")]
+        )
+        contents.insert(0, placeholder)
+
+    return contents
+
+
 class AIService:
+
+    def _get_temp(self, agent: str, override: Optional[float] = None) -> float:
+        if override is not None:
+            return override
+        return _TEMP.get(agent, _TEMP["default"])
+
+    # ── Non-streaming completion ──────────────────────────────────────────────
+
     async def chat_completion(
         self,
         messages: list[dict],
         system_prompt: str = None,
         json_mode: bool = False,
-        temperature: float = 0.7,
+        temperature: float = None,
         model: str = None,
         agent: str = "planner",
     ) -> str:
@@ -241,32 +384,27 @@ class AIService:
             raise RuntimeError("GEMINI_API_KEY is not configured")
 
         model_name = model or FLASH_MODEL
+        sys_prompt = system_prompt or AGENT_PERSONAS.get(agent, AGENT_PERSONAS["planner"])["system"]
+        temp = self._get_temp(agent, temperature)
 
-        # Build full prompt with conversation history
-        conversation_parts = []
-        if system_prompt:
-            conversation_parts.append(f"System Instructions:\n{system_prompt}")
-        elif agent in AGENT_PERSONAS:
-            conversation_parts.append(f"System Instructions:\n{AGENT_PERSONAS[agent]['system']}")
-
-        # Include conversation history (last 10 messages for context)
-        for msg in messages[-10:]:
-            role = "User" if msg["role"] == "user" else "Assistant"
-            conversation_parts.append(f"{role}: {msg['content']}")
-
-        prompt = "\n\n".join(conversation_parts)
+        processed = await _maybe_summarise(messages, agent)
+        contents = _build_contents(processed, sys_prompt)
 
         config = types.GenerateContentConfig(
-            temperature=temperature,
+            temperature=temp,
             response_mime_type="application/json" if json_mode else "text/plain",
             max_output_tokens=8192,
         )
 
         try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=config,
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config,
+                )
             )
             return response.text
         except Exception as e:
@@ -275,61 +413,70 @@ class AIService:
                 raise AIQuotaError(f"Gemini API quota exceeded: {err[:200]}")
             raise
 
+    # ── True streaming completion ─────────────────────────────────────────────
+
     async def stream_completion(
         self,
         messages: list[dict],
         system_prompt: str = None,
-        temperature: float = 0.7,
+        temperature: float = None,
         agent: str = "planner",
     ) -> AsyncGenerator[str, None]:
         if not client:
             yield "GEMINI_API_KEY is not configured"
             return
 
-        conversation_parts = []
         sys_prompt = system_prompt or AGENT_PERSONAS.get(agent, AGENT_PERSONAS["planner"])["system"]
-        conversation_parts.append(f"System Instructions:\n{sys_prompt}")
+        temp = self._get_temp(agent, temperature)
 
-        for msg in messages[-10:]:
-            role = "User" if msg["role"] == "user" else "Assistant"
-            conversation_parts.append(f"{role}: {msg['content']}")
-
-        prompt = "\n\n".join(conversation_parts)
+        processed = await _maybe_summarise(messages, agent)
+        contents = _build_contents(processed, sys_prompt)
 
         config = types.GenerateContentConfig(
-            temperature=temperature,
+            temperature=temp,
             max_output_tokens=8192,
         )
 
-        try:
-            loop = asyncio.get_event_loop()
-            full_text = await loop.run_in_executor(
-                None,
-                lambda: client.models.generate_content(
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+
+        def _stream_worker():
+            try:
+                for chunk in client.models.generate_content_stream(
                     model=FLASH_MODEL,
-                    contents=prompt,
+                    contents=contents,
                     config=config,
-                ).text
-            )
-            # Simulate streaming by chunking the response
-            words = full_text.split(" ")
-            for i, word in enumerate(words):
-                chunk = word + (" " if i < len(words) - 1 else "")
-                yield chunk
-                await asyncio.sleep(0.02)
-        except Exception as e:
-            err = str(e)
-            if "RESOURCE_EXHAUSTED" in err or "429" in err or "quota" in err.lower():
-                yield "\n\n[AKKI: Gemini API quota exceeded. Falling back to cached intelligence...]\n\n"
-                yield "I'm temporarily operating in limited mode due to API quota limits. My core knowledge base is still available for answering questions. Please try again in a few minutes for full AI-powered analysis."
-            else:
-                yield f"Error: {err[:200]}"
+                ):
+                    if chunk.text:
+                        loop.call_soon_threadsafe(queue.put_nowait, chunk.text)
+            except Exception as exc:
+                err = str(exc)
+                if "RESOURCE_EXHAUSTED" in err or "429" in err or "quota" in err.lower():
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait,
+                        "\n\n[AKKI: Gemini API quota exceeded — falling back to cached intelligence.]\n\n"
+                        "I'm temporarily in limited mode due to API quota limits. "
+                        "Core knowledge is still available. Please retry in a few minutes."
+                    )
+                else:
+                    loop.call_soon_threadsafe(queue.put_nowait, f"\n\n[Stream error: {err[:120]}]")
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)   # sentinel
+
+        loop.run_in_executor(None, _stream_worker)
+
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield item
+
+    # ── Agent routing ─────────────────────────────────────────────────────────
 
     async def route_to_agent(self, message: str, context: dict = None) -> dict:
-        """Determine which specialist agent should handle this message."""
         routing_prompt = f"""Analyze this cybersecurity request and determine the best specialist agent.
 
-Request: {message}
+Request: {message[:800]}
 
 Available agents:
 - planner: General orchestration, complex multi-step tasks, strategic planning
@@ -353,17 +500,24 @@ Return ONLY valid JSON:
             agent = parsed.get("agent", "planner")
             if agent not in AGENT_PERSONAS:
                 agent = "planner"
-            return {"agent": agent, "confidence": parsed.get("confidence", 0.8), "reason": parsed.get("reason", "")}
+            return {
+                "agent": agent,
+                "confidence": parsed.get("confidence", 0.8),
+                "reason": parsed.get("reason", ""),
+            }
         except Exception:
             return {"agent": "planner", "confidence": 0.5, "reason": "Default routing"}
 
-    async def analyze_code(self, code: str, language: str) -> dict:
-        prompt = f"""You are PHANTOM, an elite exploit researcher analyzing code for security vulnerabilities.
-Perform a comprehensive security audit of this {language} code.
+    # ── Code analysis & exploit generation ───────────────────────────────────
 
-```{language}
-{code[:3000]}
-```
+    async def analyze_code(self, code: str, language: str) -> dict:
+        # Wrap user code in XML delimiters to prevent injection from code content
+        prompt = f"""You are PHANTOM, an elite exploit researcher auditing code for security vulnerabilities.
+Perform a comprehensive security audit of the following {language} code.
+
+<code language="{language}">
+{code[:4000]}
+</code>
 
 Return ONLY valid JSON:
 {{
@@ -377,16 +531,25 @@ Return ONLY valid JSON:
   "riskLevel": "critical",
   "attackSurface": "Web application API endpoint"
 }}"""
-        result = await self.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.2)
-        return json.loads(result)
+        result = await self.chat_completion(
+            [{"role": "user", "content": prompt}],
+            json_mode=True,
+            temperature=0.20,
+            agent="exploit",
+        )
+        data = json.loads(result)
+        # Validate MITRE tags before returning
+        if "mitreTags" in data:
+            data["mitreTags"] = _validate_mitre_tags(data["mitreTags"])
+        return data
 
     async def generate_exploit(self, code: str, exploit_type: str, language: str) -> dict:
         prompt = f"""You are PHANTOM, generating educational security research content.
-Create a {exploit_type} proof-of-concept for this {language} code for authorized penetration testing.
+Create a {exploit_type} proof-of-concept for the following {language} code for authorized penetration testing.
 
-```{language}
+<code language="{language}">
 {code[:2000]}
-```
+</code>
 
 Return ONLY valid JSON:
 {{
@@ -399,16 +562,36 @@ Return ONLY valid JSON:
   "educational_note": "For authorized testing only",
   "attackSteps": ["Step 1: Identify injection point", "Step 2: Craft payload", "Step 3: Execute"]
 }}"""
-        result = await self.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.3)
-        return json.loads(result)
+        result = await self.chat_completion(
+            [{"role": "user", "content": prompt}],
+            json_mode=True,
+            temperature=0.25,
+            agent="exploit",
+        )
+        data = json.loads(result)
+        if "mitreTechnique" in data:
+            valid = _validate_mitre_tags([data["mitreTechnique"]])
+            if not valid:
+                data["mitreTechnique"] = None
+        return data
 
-    async def process_cybersecurity_message(self, message: str, context: dict = None, history: list = None) -> dict:
-        """Process a message with intelligent agent routing."""
+    # ── Full message processing ───────────────────────────────────────────────
+
+    async def process_cybersecurity_message(
+        self, message: str, context: dict = None, history: list = None
+    ) -> dict:
+        if _check_prompt_injection(message):
+            logger.warning("Prompt injection attempt blocked: %s", message[:120])
+            raise PromptInjectionError(
+                "Input contains patterns that resemble prompt injection. "
+                "Please rephrase your security research question."
+            )
+
         routing = await self.route_to_agent(message, context)
         agent_key = routing["agent"]
         agent_info = AGENT_PERSONAS.get(agent_key, AGENT_PERSONAS["planner"])
 
-        workspace = context.get("workspace", "") if context else ""
+        workspace = (context or {}).get("workspace", "")
         user_prompt = f"[{workspace.upper()} WORKSPACE]\n{message}" if workspace else message
 
         messages = (history or []) + [{"role": "user", "content": user_prompt}]
@@ -416,8 +599,9 @@ Return ONLY valid JSON:
         response_text = await self.chat_completion(
             messages,
             agent=agent_key,
-            temperature=0.7,
         )
+
+        cves = _validate_cves(response_text)
 
         return {
             "content": response_text,
@@ -426,26 +610,43 @@ Return ONLY valid JSON:
             "agentRole": agent_info["role"],
             "agentColor": agent_info["color"],
             "routing": routing,
+            "detectedCVEs": cves,
         }
 
-    async def generate_pentest_report(self, findings: list, executive_summary: str = None, scope: str = None) -> dict:
+    # ── Report generation ─────────────────────────────────────────────────────
+
+    async def generate_pentest_report(
+        self, findings: list, executive_summary: str = None, scope: str = None
+    ) -> dict:
         prompt = f"""You are a senior penetration tester generating a professional report.
 
 Findings: {json.dumps(findings[:10])}
 Scope: {scope or 'All systems'}
 
 Return ONLY valid JSON with keys: executiveSummary, technicalDetails, recommendations (list), riskRating, methodology"""
-        result = await self.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.3)
+        result = await self.chat_completion(
+            [{"role": "user", "content": prompt}],
+            json_mode=True,
+            temperature=0.25,
+            agent="planner",
+        )
         return json.loads(result)
 
-    async def generate_osint_strategy(self, target: str, objectives: list, constraints: str = None) -> dict:
+    async def generate_osint_strategy(
+        self, target: str, objectives: list, constraints: str = None
+    ) -> dict:
         prompt = f"""You are GHOST, generating an OSINT strategy for authorized security testing.
 
-Target: {target}
-Objectives: {', '.join(objectives)}
+Target: {target[:200]}
+Objectives: {', '.join(objectives[:10])}
 
 Return ONLY valid JSON with keys: phases (list), tools (list), timeline, legalConsiderations, deliverables (list), priorityTargets (list)"""
-        result = await self.chat_completion([{"role": "user", "content": prompt}], json_mode=True, temperature=0.3)
+        result = await self.chat_completion(
+            [{"role": "user", "content": prompt}],
+            json_mode=True,
+            temperature=0.25,
+            agent="recon",
+        )
         return json.loads(result)
 
 

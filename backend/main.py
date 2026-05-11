@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Any
 from contextlib import asynccontextmanager
@@ -9,17 +10,25 @@ from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, F
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, EmailStr
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, update
 
 from backend.database import get_db, init_db
 from backend.models import User, Session, Message, Document, Memory, ToolRun, Finding, VoiceInteraction, WorkspaceRecord
 from backend.auth import hash_password, verify_password, create_access_token, get_current_user
-from backend.services.ai_service import ai_service, AIQuotaError, AGENT_PERSONAS
+from backend.services.ai_service import ai_service, AIQuotaError, PromptInjectionError, AGENT_PERSONAS
 from backend.services.agent_service import agent_service
 from backend.services.tool_service import run_tool
 from backend.services.tutor_service import tutor_service
 from backend.services.report_service import generate_pdf_report, generate_docx_report
+
+logger = logging.getLogger("akki.main")
+
+# ── Rate Limiter ──────────────────────────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 
 
 @asynccontextmanager
@@ -28,7 +37,10 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="AMMU AI Cybersecurity Platform", lifespan=lifespan)
+app = FastAPI(title="AKKI AI Cybersecurity Platform", lifespan=lifespan)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,6 +49,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
@@ -267,7 +292,8 @@ async def health():
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 @app.post("/api/auth/register")
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("10/minute")
+async def register(request: Request, body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     if body.password != body.confirmPassword:
         raise HTTPException(status_code=400, detail="Passwords don't match")
 
@@ -299,7 +325,8 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/auth/login")
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("20/minute")
+async def login(request: Request, body: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
     if not user or not verify_password(body.password, user.password):
@@ -375,7 +402,9 @@ async def get_session_messages(
 # ── Chat ──────────────────────────────────────────────────────────────────────
 
 @app.post("/api/protected/chat/message")
+@limiter.limit("60/minute")
 async def chat_message(
+    request: Request,
     body: ChatMessageRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -414,6 +443,14 @@ async def chat_message(
             voice_input=body.voiceInput,
             context={"emotionalTone": body.emotionalTone, "workspace": "chat"},
         )
+    except PromptInjectionError as e:
+        agent_response = {
+            "content": f"⚠️ Security Notice: {e}",
+            "toolCalls": [],
+            "ragUsed": False,
+            "sources": [],
+            "emotionalTone": "neutral",
+        }
     except Exception as e:
         agent_response = {
             "content": "I encountered an issue processing your request. Please try again.",
@@ -693,7 +730,9 @@ async def rag_query(request: Request, current_user: User = Depends(get_current_u
 # ── Coding workspace ──────────────────────────────────────────────────────────
 
 @app.post("/api/coding/analyze")
+@limiter.limit("30/minute")
 async def analyze_code(
+    request: Request,
     body: CodeAnalysisRequest,
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
@@ -726,7 +765,9 @@ async def analyze_code(
 
 
 @app.post("/api/coding/generate-exploit")
+@limiter.limit("20/minute")
 async def generate_exploit(
+    request: Request,
     body: ExploitGenerationRequest,
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
@@ -784,7 +825,9 @@ async def get_exploits(
 # ── Red Team workspace ────────────────────────────────────────────────────────
 
 @app.post("/api/redteam/simulations")
+@limiter.limit("20/minute")
 async def create_simulation(
+    request: Request,
     body: SimulationRequest,
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
@@ -844,7 +887,9 @@ IMPORTANT: This simulation is for authorized security testing only."""
 
 
 @app.post("/api/redteam/campaigns")
+@limiter.limit("20/minute")
 async def create_campaign(
+    request: Request,
     body: CampaignRequest,
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
@@ -888,7 +933,9 @@ Return valid JSON (no markdown):
 
 
 @app.post("/api/redteam/chains/generate")
+@limiter.limit("20/minute")
 async def generate_chain(
+    request: Request,
     body: ChainGenerationRequest,
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
@@ -977,7 +1024,9 @@ async def get_chains(
 # ── OSINT workspace ───────────────────────────────────────────────────────────
 
 @app.post("/api/osint/domain")
+@limiter.limit("20/minute")
 async def osint_domain(
+    request: Request,
     body: DomainOSINTRequest,
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
@@ -1041,7 +1090,9 @@ Note: This is simulated OSINT for authorized security research."""
 
 
 @app.post("/api/osint/github")
+@limiter.limit("20/minute")
 async def osint_github(
+    request: Request,
     body: GitHubOSINTRequest,
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
@@ -1098,7 +1149,9 @@ Return comprehensive GitHub intelligence as valid JSON (no markdown):
 
 
 @app.post("/api/osint/shodan")
+@limiter.limit("20/minute")
 async def osint_shodan(
+    request: Request,
     body: ShodanRequest,
     current_user: Optional[User] = Depends(optional_current_user),
     db: AsyncSession = Depends(get_db),
@@ -1482,33 +1535,73 @@ async def get_agents():
 # ── Streaming Chat ─────────────────────────────────────────────────────────────
 
 @app.post("/api/chat/stream")
+@limiter.limit("40/minute")
 async def stream_chat(
+    request: Request,
     body: StreamChatRequest,
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Server-Sent Events streaming chat endpoint."""
+    """Server-Sent Events streaming chat endpoint with true Gemini token streaming."""
     import json as _json
 
+    # Load recent session history for context
+    history: list[dict] = []
+    if body.sessionId:
+        hist_result = await db.execute(
+            select(Message)
+            .where(Message.session_id == body.sessionId)
+            .order_by(desc(Message.created_at))
+            .limit(30)
+        )
+        for m in reversed(hist_result.scalars().all()):
+            history.append({"role": m.role, "content": m.content})
+
+    messages = history + [{"role": "user", "content": body.content}]
+
     async def event_generator():
-        # Route to agent first
         try:
+            # Prompt injection check — send error event and stop
+            from backend.services.ai_service import _check_prompt_injection
+            if _check_prompt_injection(body.content):
+                logger.warning("Prompt injection blocked in stream: %s", body.content[:80])
+                yield f"data: {_json.dumps({'type': 'error', 'message': 'Input flagged by security filter. Please rephrase your query.'})}\n\n"
+                return
+
             routing = await ai_service.route_to_agent(body.content)
             agent_key = body.agent or routing.get("agent", "planner")
             agent_info = AGENT_PERSONAS.get(agent_key, AGENT_PERSONAS["planner"])
 
-            # Send agent info event
             yield f"data: {_json.dumps({'type': 'agent', 'agent': agent_key, 'agentName': agent_info['name'], 'agentRole': agent_info['role']})}\n\n"
 
-            # Stream content
+            full_response = []
             async for chunk in ai_service.stream_completion(
-                [{"role": "user", "content": body.content}],
+                messages,
                 agent=agent_key,
             ):
+                full_response.append(chunk)
                 yield f"data: {_json.dumps({'type': 'token', 'text': chunk})}\n\n"
+
+            # Persist assistant message to DB
+            if body.sessionId and full_response:
+                complete_text = "".join(full_response)
+                assistant_msg = Message(
+                    id=str(uuid.uuid4()),
+                    session_id=body.sessionId,
+                    role="assistant",
+                    content=complete_text,
+                    tool_calls=[],
+                    metadata_={"agent": agent_key, "agentName": agent_info["name"], "streaming": True},
+                )
+                db.add(assistant_msg)
+                await db.commit()
 
             yield f"data: {_json.dumps({'type': 'done'})}\n\n"
 
+        except PromptInjectionError as e:
+            yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
         except Exception as e:
+            logger.error("Stream error: %s", e, exc_info=True)
             yield f"data: {_json.dumps({'type': 'error', 'message': str(e)[:200]})}\n\n"
 
     return StreamingResponse(
@@ -1517,6 +1610,7 @@ async def stream_chat(
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
         },
     )
 
