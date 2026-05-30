@@ -1,0 +1,3 @@
+- [ChromaDB v3 EF fix](chromadb-ef.md) — chromadb v3 requires an explicit IEmbeddingFunction; passing `embeddingFunction: null` or omitting it crashes on startup.
+- [Drizzle push blocks startup](drizzle-push.md) — `drizzle-kit push` is interactive; running it in start.sh will hang waiting for user input if schema has data-loss statements. Skip it from start.sh.
+- [Gemini system role bug](gemini-system-role.md) — Gemini chat history only allows `user`/`model` roles; system messages must be passed via `systemInstruction`, not in the messages array.

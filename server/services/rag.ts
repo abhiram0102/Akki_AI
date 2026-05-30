@@ -1,10 +1,18 @@
-import { ChromaClient } from "chromadb";
+import { ChromaClient, type IEmbeddingFunction } from "chromadb";
 import pdf from "pdf-parse";
 import { storage } from "../storage";
 import { aiService } from "./ai";
 import type { InsertDocument, InsertChunk } from "@shared/schema";
+
+// Custom embedding function wrapping Gemini embeddings for ChromaDB v3 compatibility
+const geminiEmbeddingFunction: IEmbeddingFunction = {
+  generate: async (texts: string[]): Promise<number[][]> => {
+    return Promise.all(texts.map((text) => aiService.generateEmbedding(text)));
+  },
+};
+
 const chromaClient = new ChromaClient({
-  path: process.env.CHROMA_URL || "http://localhost:8000"
+  path: process.env.CHROMA_URL || "http://localhost:8000",
 });
 
 // Flag to track if ChromaDB is available
@@ -34,71 +42,58 @@ class RAGService {
 
   async initialize() {
     try {
-      // Create or get collection
       this.collection = await chromaClient.getOrCreateCollection({
         name: this.collectionName,
         metadata: { "hnsw:space": "cosine" },
-        embeddingFunction: null // ✅ Tell Chroma we’re handling embeddings ourselves
+        embeddingFunction: geminiEmbeddingFunction,
       });
-      console.log("RAG service initialized successfully");
+      console.log("[RAGService] Initialized successfully");
       chromaAvailable = true;
     } catch (error) {
-      console.error("RAG service initialization error:", error);
-      console.log("⚠️ ChromaDB not available - RAG features will be disabled");
+      console.error("[RAGService] Initialization error:", error);
+      console.log("[RAGService] ChromaDB not available — RAG features disabled");
       chromaAvailable = false;
-      // Don't throw - allow app to continue without vector storage
     }
   }
 
   async ingestDocument(options: DocumentIngestOptions): Promise<any> {
     if (!chromaAvailable) {
-      console.log("⚠️ ChromaDB not available - document ingestion disabled");
-      throw new Error("Vector database not available. Please try again later.");
+      throw new Error("Vector database not available. Document ingestion is disabled.");
     }
-    
-    try {
-      const { file, userId, title, tags = [] } = options;
-      
-      // Extract text based on file type
-      let extractedText = "";
-      let metadata: any = {
-        size: file.size,
-        mimeType: file.mimetype
-      };
 
-      if (file.mimetype === "application/pdf") {
-        const pdfData = await pdf(file.buffer);
-        extractedText = pdfData.text;
-        metadata.pages = pdfData.numpages;
-      } else if (file.mimetype.startsWith("text/")) {
-        extractedText = file.buffer.toString("utf-8");
-      } else if (file.mimetype.includes("markdown")) {
-        extractedText = file.buffer.toString("utf-8");
-      } else {
-        throw new Error("Unsupported file type");
-      }
+    const { file, userId, title, tags = [] } = options;
 
-      // Create document record
-      const document = await storage.createDocument({
-        ownerId: userId,
-        title,
-        type: this.getDocumentType(file.mimetype),
-        content: extractedText,
-        tags,
-        metadata
-      });
+    let extractedText = "";
+    const metadata: Record<string, any> = {
+      size: file.size,
+      mimeType: file.mimetype,
+    };
 
-      // Chunk the document
-      const chunks = this.chunkText(extractedText, {
-        chunkSize: 1000,
-        overlap: 200
-      });
+    if (file.mimetype === "application/pdf") {
+      const pdfData = await pdf(file.buffer);
+      extractedText = pdfData.text;
+      metadata.pages = pdfData.numpages;
+    } else if (file.mimetype.startsWith("text/") || file.mimetype.includes("markdown")) {
+      extractedText = file.buffer.toString("utf-8");
+    } else {
+      throw new Error(`Unsupported file type: ${file.mimetype}`);
+    }
 
-      // Generate embeddings and store chunks
-      const chunkPromises = chunks.map(async (chunk, index) => {
+    const document = await storage.createDocument({
+      ownerId: userId,
+      title,
+      type: this.getDocumentType(file.mimetype),
+      content: extractedText,
+      tags,
+      metadata,
+    });
+
+    const chunks = this.chunkText(extractedText, { chunkSize: 1000, overlap: 200 });
+
+    const chunkResults = await Promise.allSettled(
+      chunks.map(async (chunk, index) => {
         const embedding = await aiService.generateEmbedding(chunk.content);
-        
-        // Store in vector database
+
         await this.collection.add({
           ids: [`${document.id}_chunk_${index}`],
           embeddings: [embedding],
@@ -108,34 +103,27 @@ class RAGService {
             chunkIndex: index,
             title,
             tags: tags.join(","),
-            ...chunk.metadata
-          }]
+            ...chunk.metadata,
+          }],
         });
 
-        // Store in PostgreSQL
         return storage.createChunk({
           documentId: document.id,
           content: chunk.content,
           embedding,
-          metadata: {
-            chunkIndex: index,
-            ...chunk.metadata
-          }
+          metadata: { chunkIndex: index, ...chunk.metadata },
         });
-      });
+      })
+    );
 
-      await Promise.all(chunkPromises);
-
-      // Update document with embedding timestamp
-      await storage.updateDocument(document.id, {
-        embeddedAt: new Date()
-      });
-
-      return document;
-    } catch (error) {
-      console.error("Document ingestion error:", error);
-      throw error;
+    const failed = chunkResults.filter(r => r.status === "rejected");
+    if (failed.length > 0) {
+      console.error(`[RAGService] ${failed.length} chunk(s) failed to ingest`);
     }
+
+    await storage.updateDocument(document.id, { embeddedAt: new Date() });
+
+    return document;
   }
 
   async query(options: {
@@ -144,57 +132,64 @@ class RAGService {
     filters?: Record<string, any>;
   }): Promise<RAGQueryResult> {
     if (!chromaAvailable) {
-      // Fallback to direct AI response without RAG
       const directAnswer = await aiService.generateCybersecurityResponse(
         options.query,
-        "ChromaDB not available - providing direct AI response",
+        "No knowledge base available — providing direct AI response",
         []
       );
-      
-      return {
-        answer: directAnswer.content,
-        sources: [],
-        confidence: 0.5 // Lower confidence without RAG context
-      };
+      return { answer: directAnswer.content, sources: [], confidence: 0.5 };
     }
-    
-    try {
-      const { query, topK = 5, filters = {} } = options;
 
-      // Generate query embedding
-      const queryEmbedding = await aiService.generateEmbedding(query);
+    const { query, topK = 5, filters = {} } = options;
+    const queryEmbedding = await aiService.generateEmbedding(query);
 
-      // Search vector database
-      const searchResults = await this.collection.query({
-        queryEmbeddings: [queryEmbedding],
-        nResults: topK,
-        where: filters
-      });
+    const searchResults = await this.collection.query({
+      queryEmbeddings: [queryEmbedding],
+      nResults: topK,
+      ...(Object.keys(filters).length > 0 ? { where: filters } : {}),
+    });
 
-      // Format search results
-      const sources = searchResults.documents[0].map((doc: string, index: number) => ({
-        content: doc,
-        source: searchResults.metadatas[0][index]?.title || "Unknown",
-        relevanceScore: 1 - (searchResults.distances[0][index] || 0),
-        metadata: searchResults.metadatas[0][index]
-      }));
+    const sources = (searchResults.documents[0] as string[]).map((doc, index) => ({
+      content: doc,
+      source: searchResults.metadatas[0][index]?.title || "Unknown",
+      relevanceScore: 1 - (searchResults.distances[0][index] || 0),
+      metadata: searchResults.metadatas[0][index],
+    }));
 
-      // Generate contextual answer using RAG
-      const contextualAnswer = await aiService.generateCybersecurityResponse(
-        query,
-        `RAG Query Context: ${sources.length} relevant sources found`,
-        sources
-      );
+    const contextualAnswer = await aiService.generateCybersecurityResponse(
+      query,
+      `${sources.length} relevant knowledge base sources found`,
+      sources
+    );
 
-      return {
-        answer: contextualAnswer.content,
-        sources,
-        confidence: this.calculateConfidence(sources)
-      };
-    } catch (error) {
-      console.error("RAG query error:", error);
-      throw error;
+    return {
+      answer: contextualAnswer.content,
+      sources,
+      confidence: this.calculateConfidence(sources),
+    };
+  }
+
+  async deleteDocument(documentId: string): Promise<void> {
+    if (chromaAvailable) {
+      const chunks = await storage.getDocumentChunks(documentId);
+      const chunkIds = chunks.map((_, index) => `${documentId}_chunk_${index}`);
+      if (chunkIds.length > 0) {
+        await this.collection.delete({ ids: chunkIds });
+      }
     }
+    await storage.deleteDocumentChunks(documentId);
+    await storage.deleteDocument(documentId);
+  }
+
+  async searchDocuments(userId: string, query: string): Promise<any[]> {
+    const userDocuments = await storage.getUserDocuments(userId);
+    const q = query.toLowerCase();
+    return userDocuments.filter(
+      (doc) =>
+        doc.title.toLowerCase().includes(q) ||
+        doc.content?.toLowerCase().includes(q) ||
+        doc.tags?.some((tag) => tag.toLowerCase().includes(q))
+    );
   }
 
   private chunkText(
@@ -203,42 +198,35 @@ class RAGService {
   ): Array<{ content: string; metadata: any }> {
     const { chunkSize, overlap } = options;
     const chunks: Array<{ content: string; metadata: any }> = [];
-    
-    // Simple chunking strategy - can be improved with sentence boundary detection
     let startIndex = 0;
     let chunkIndex = 0;
-    
+
     while (startIndex < text.length) {
       const endIndex = Math.min(startIndex + chunkSize, text.length);
       const chunkContent = text.slice(startIndex, endIndex);
-      
-      // Try to break at sentence boundaries
+
       let actualEndIndex = endIndex;
       if (endIndex < text.length) {
-        const lastPeriod = chunkContent.lastIndexOf('. ');
-        const lastNewline = chunkContent.lastIndexOf('\n');
+        const lastPeriod = chunkContent.lastIndexOf(". ");
+        const lastNewline = chunkContent.lastIndexOf("\n");
         const breakPoint = Math.max(lastPeriod, lastNewline);
-        
-        if (breakPoint > chunkSize * 0.7) { // Don't make chunks too small
+        if (breakPoint > chunkSize * 0.7) {
           actualEndIndex = startIndex + breakPoint + 1;
         }
       }
-      
-      const finalContent = text.slice(startIndex, actualEndIndex);
-      
-      chunks.push({
-        content: finalContent.trim(),
-        metadata: {
-          startOffset: startIndex,
-          endOffset: actualEndIndex,
-          chunkIndex
-        }
-      });
-      
+
+      const finalContent = text.slice(startIndex, actualEndIndex).trim();
+      if (finalContent.length > 0) {
+        chunks.push({
+          content: finalContent,
+          metadata: { startOffset: startIndex, endOffset: actualEndIndex, chunkIndex },
+        });
+      }
+
       startIndex = actualEndIndex - overlap;
       chunkIndex++;
     }
-    
+
     return chunks;
   }
 
@@ -252,50 +240,12 @@ class RAGService {
 
   private calculateConfidence(sources: any[]): number {
     if (sources.length === 0) return 0;
-    
-    const avgRelevance = sources.reduce((sum, source) => sum + source.relevanceScore, 0) / sources.length;
-    const sourceQuality = sources.length >= 3 ? 1 : sources.length / 3;
-    
+    const avgRelevance =
+      sources.reduce((sum, s) => sum + s.relevanceScore, 0) / sources.length;
+    const sourceQuality = Math.min(sources.length / 3, 1);
     return Math.min(avgRelevance * sourceQuality, 1);
-  }
-
-  async deleteDocument(documentId: string): Promise<void> {
-    try {
-      // Delete from vector database
-      const chunks = await storage.getDocumentChunks(documentId);
-      const chunkIds = chunks.map((_, index) => `${documentId}_chunk_${index}`);
-      
-      if (chunkIds.length > 0) {
-        await this.collection.delete({
-          ids: chunkIds
-        });
-      }
-
-      // Delete from PostgreSQL
-      await storage.deleteDocumentChunks(documentId);
-      await storage.deleteDocument(documentId);
-    } catch (error) {
-      console.error("Document deletion error:", error);
-      throw error;
-    }
-  }
-
-  async searchDocuments(userId: string, query: string): Promise<any[]> {
-    try {
-      const userDocuments = await storage.getUserDocuments(userId);
-      return userDocuments.filter(doc => 
-        doc.title.toLowerCase().includes(query.toLowerCase()) ||
-        doc.content?.toLowerCase().includes(query.toLowerCase()) ||
-        (doc.tags && doc.tags.some(tag => tag.toLowerCase().includes(query.toLowerCase())))
-      );
-    } catch (error) {
-      console.error("Document search error:", error);
-      throw error;
-    }
   }
 }
 
 export const ragService = new RAGService();
-
-// Initialize the service
 ragService.initialize().catch(console.error);

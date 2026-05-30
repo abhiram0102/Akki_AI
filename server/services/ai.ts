@@ -1,11 +1,15 @@
-import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { z } from "zod";
 
 const apiKey = process.env.GEMINI_API_KEY;
 if (!apiKey) {
-  throw new Error("GEMINI_API_KEY is not set");
+  console.error("[AIService] GEMINI_API_KEY is not set — AI features will be unavailable");
 }
-const genAI = new GoogleGenerativeAI(apiKey);
+
+const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
+
+const DEFAULT_MODEL = "gemini-2.0-flash";
+const EMBEDDING_MODEL = "text-embedding-004";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -21,59 +25,80 @@ export interface ChatCompletionOptions {
 }
 
 class AIService {
+  private getModel(modelName: string, systemInstruction?: string, jsonMode = false) {
+    if (!genAI) throw new Error("GEMINI_API_KEY is not configured");
+    return genAI.getGenerativeModel({
+      model: modelName,
+      ...(systemInstruction ? { systemInstruction } : {}),
+      generationConfig: {
+        responseMimeType: jsonMode ? "application/json" : "text/plain",
+      },
+    });
+  }
+
   async chatCompletion(
     messages: ChatMessage[],
     options: ChatCompletionOptions = {}
   ): Promise<string> {
     try {
       const {
-        model = "gemini-1.5-pro-latest",
+        model = DEFAULT_MODEL,
         temperature,
         maxTokens,
         systemPrompt,
         jsonMode = false,
       } = options;
 
+      if (!genAI) throw new Error("GEMINI_API_KEY is not configured");
+
+      // Separate system messages from conversation history
+      const systemMessages = messages.filter(m => m.role === "system");
+      const conversationMessages = messages.filter(m => m.role !== "system");
+
+      // Merge explicit systemPrompt with any system-role messages
+      const combinedSystemInstruction = [
+        systemPrompt,
+        ...systemMessages.map(m => m.content),
+      ].filter(Boolean).join("\n\n") || undefined;
+
       const geminiModel = genAI.getGenerativeModel({
         model,
-        systemInstruction: systemPrompt,
+        ...(combinedSystemInstruction ? { systemInstruction: combinedSystemInstruction } : {}),
         generationConfig: {
           responseMimeType: jsonMode ? "application/json" : "text/plain",
-          maxOutputTokens: maxTokens,
-          temperature,
+          ...(maxTokens !== undefined ? { maxOutputTokens: maxTokens } : {}),
+          ...(temperature !== undefined ? { temperature } : {}),
         },
       });
 
-      const history = messages.map((msg) => ({
+      // Build chat history — Gemini only supports "user" and "model" roles
+      const history = conversationMessages.slice(0, -1).map((msg) => ({
         role: msg.role === "assistant" ? "model" : "user",
         parts: [{ text: msg.content }],
       }));
 
-      const lastMessage = history.pop();
+      const lastMessage = conversationMessages[conversationMessages.length - 1];
       if (!lastMessage) {
-        throw new Error("No message to send");
+        throw new Error("No user message to send");
       }
 
-      const chat = geminiModel.startChat({
-        history: history,
-      });
-
-      const result = await chat.sendMessage(lastMessage.parts[0].text);
-      const response = result.response;
-      return response.text();
+      const chat = geminiModel.startChat({ history });
+      const result = await chat.sendMessage(lastMessage.content);
+      return result.response.text();
     } catch (error) {
-      console.error("Gemini chat completion error:", error);
+      console.error("[AIService] chatCompletion error:", error);
       throw new Error(`Chat completion failed: ${error instanceof Error ? error.message : "Unknown error"}`);
     }
   }
 
   async generateEmbedding(text: string): Promise<number[]> {
     try {
-      const model = genAI.getGenerativeModel({ model: "embedding-001" });
+      if (!genAI) throw new Error("GEMINI_API_KEY is not configured");
+      const model = genAI.getGenerativeModel({ model: EMBEDDING_MODEL });
       const result = await model.embedContent(text);
       return result.embedding.values;
     } catch (error) {
-      console.error("Gemini embedding error:", error);
+      console.error("[AIService] generateEmbedding error:", error);
       throw new Error(`Embedding generation failed: ${error instanceof Error ? error.message : "Unknown error"}`);
     }
   }
@@ -90,60 +115,40 @@ class AIService {
   }> {
     try {
       const contextSection = ragSources && ragSources.length > 0
-        ? `\n\nRelevant context from your knowledge base:\n${ragSources.map((s, i) => `[${i + 1}] ${s.content} (Source: ${s.source})`).join('\n')}`
+        ? `\n\nRelevant knowledge base context:\n${ragSources.map((s, i) => `[${i + 1}] ${s.content} (Source: ${s.source})`).join('\n')}`
         : "";
 
-      const systemPrompt = `You are Ammu, an advanced AI cybersecurity copilot with deep expertise in:
-      - Vulnerability analysis and exploitation
-      - Red team operations and MITRE ATT&CK framework
-      - OSINT and reconnaissance techniques
-      - Security tool integration and automation
-      - Incident response and threat hunting
+      const systemPrompt = `You are Ammu, an advanced AI cybersecurity copilot. Expertise: vulnerability analysis, red team operations, MITRE ATT&CK, OSINT, incident response.
 
-      Your personality:
-      - Professional but approachable
-      - Detail-oriented and methodical
-      - Proactive in suggesting security improvements
-      - Ethical and responsible in security practices
+Personality: professional, detail-oriented, methodical, ethical.
 
-      When responding:
-      1. Provide accurate, actionable cybersecurity guidance
-      2. Reference MITRE ATT&CK techniques when relevant
-      3. Include risk assessments and mitigation strategies
-      4. Cite sources when using provided context
-      5. Maintain awareness of ethical boundaries and legal compliance
-
-      Always format your response as JSON with:
-      - content: your detailed response
-      - sources: array of source references used
-      - mitreTags: relevant MITRE ATT&CK technique IDs
-      - riskLevel: assessment of the discussed topic/action`;
+Always respond as valid JSON with exactly these fields:
+- content: string — your detailed response
+- sources: string[] — source references used  
+- mitreTags: string[] — relevant MITRE ATT&CK technique IDs
+- riskLevel: "low" | "medium" | "high"`;
 
       const userPrompt = `${query}\n\nContext: ${context}${contextSection}`;
 
       const response = await this.chatCompletion(
         [{ role: "user", content: userPrompt }],
-        {
-          systemPrompt,
-          jsonMode: true,
-          temperature: 0.6,
-        }
+        { systemPrompt, jsonMode: true, temperature: 0.6 }
       );
 
       const parsed = JSON.parse(response);
-      
+
       const schema = z.object({
         content: z.string(),
-        sources: z.array(z.string()),
-        mitreTags: z.array(z.string()),
-        riskLevel: z.enum(["low", "medium", "high"]),
+        sources: z.array(z.string()).default([]),
+        mitreTags: z.array(z.string()).default([]),
+        riskLevel: z.enum(["low", "medium", "high"]).default("low"),
       });
 
       return schema.parse(parsed);
     } catch (error) {
-      console.error("Cybersecurity response error:", error);
+      console.error("[AIService] generateCybersecurityResponse error:", error);
       return {
-        content: "I apologize, but I'm experiencing technical difficulties processing your cybersecurity query. Please try again or rephrase your question.",
+        content: "I'm experiencing technical difficulties processing your cybersecurity query. Please try again.",
         sources: [],
         mitreTags: [],
         riskLevel: "low",
@@ -151,11 +156,9 @@ class AIService {
     }
   }
 
-  // Multi-modal analysis for cybersecurity
   async analyzeMultiModalContent(
     text: string,
-    images?: Buffer[],
-    audioData?: string
+    images?: Buffer[]
   ): Promise<{
     analysis: string;
     securityFindings: Array<{
@@ -168,63 +171,50 @@ class AIService {
     recommendations: string[];
   }> {
     try {
-      const model = genAI.getGenerativeModel({ 
-        model: "gemini-1.5-pro-latest",
-        systemInstruction: `You are AMMU, an advanced cybersecurity AI. Analyze all provided content for security insights, vulnerabilities, IOCs, and threats.
-        
-        Focus on:
-        - Code vulnerabilities and exploits
-        - Network traffic analysis
-        - Malware artifacts and signatures
-        - OSINT findings and reconnaissance data
-        - Security misconfigurations
-        - Threat intelligence indicators
-        
-        Always provide actionable security intelligence and MITRE ATT&CK mappings when relevant.`
+      if (!genAI) throw new Error("GEMINI_API_KEY is not configured");
+
+      const model = genAI.getGenerativeModel({
+        model: DEFAULT_MODEL,
+        systemInstruction: `You are AMMU, an advanced cybersecurity AI. Analyze all content for security insights, vulnerabilities, IOCs, and threats. Focus on: code vulnerabilities, network artifacts, malware signatures, OSINT data, misconfigurations, threat indicators. Always provide actionable security intelligence with MITRE ATT&CK mappings. Respond as valid JSON.`,
+        generationConfig: { responseMimeType: "application/json", temperature: 0.3 },
       });
 
       const parts: any[] = [{ text }];
-      
-      // Add images if provided
+
       if (images && images.length > 0) {
-        images.forEach((image, index) => {
+        images.forEach((image) => {
           parts.push({
             inlineData: {
               data: image.toString('base64'),
-              mimeType: 'image/jpeg'
-            }
+              mimeType: 'image/jpeg',
+            },
           });
         });
       }
 
       const result = await model.generateContent({
         contents: [{ role: "user", parts }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          temperature: 0.3,
-        }
       });
 
       const response = JSON.parse(result.response.text());
-      
+
       return {
         analysis: response.analysis || "Multi-modal analysis completed",
         securityFindings: response.securityFindings || [],
         iocs: response.iocs || [],
-        recommendations: response.recommendations || []
+        recommendations: response.recommendations || [],
       };
     } catch (error) {
-      console.error("Multi-modal analysis error:", error);
+      console.error("[AIService] analyzeMultiModalContent error:", error);
       return {
         analysis: "Error performing multi-modal analysis",
         securityFindings: [],
         iocs: [],
-        recommendations: []
+        recommendations: [],
       };
     }
   }
 
-  // Advanced exploit generation
   async generateExploitPoC(
     vulnerability: string,
     target: string,
@@ -244,53 +234,48 @@ class AIService {
     try {
       const systemPrompt = `You are AMMU, an expert red team operator and exploit developer. Generate educational proof-of-concept exploits with detailed explanations.
 
-      IMPORTANT ETHICAL GUIDELINES:
-      - Only provide educational content for authorized testing
-      - Include clear warnings about legal/ethical use
-      - Focus on defensive understanding and remediation
-      - Never provide ready-to-use malicious code
-      
-      Always include MITRE ATT&CK technique mappings and comprehensive remediation guidance.`;
+ETHICAL GUIDELINES:
+- Educational content for authorized testing only
+- Include clear legal/ethical use warnings
+- Focus on defensive understanding and remediation
+- Never provide ready-to-use malicious payloads
 
-      const userPrompt = `Generate a proof-of-concept exploit for: ${vulnerability}
-      Target: ${target}
-      Constraints: ${JSON.stringify(constraints || {})}
-      
-      Provide educational code with extensive comments explaining each step, potential countermeasures, and defensive strategies.`;
+Always include MITRE ATT&CK mappings and comprehensive remediation guidance. Respond as valid JSON.`;
+
+      const userPrompt = `Generate an educational proof-of-concept for: ${vulnerability}
+Target context: ${target}
+Constraints: ${JSON.stringify(constraints || {})}
+
+Provide educational code with extensive comments, countermeasures, and defensive strategies.`;
 
       const response = await this.chatCompletion(
         [{ role: "user", content: userPrompt }],
-        {
-          systemPrompt,
-          jsonMode: true,
-          temperature: 0.4,
-        }
+        { systemPrompt, jsonMode: true, temperature: 0.4 }
       );
 
       const parsed = JSON.parse(response);
-      
+
       return {
-        code: parsed.code || "",
+        code: parsed.code || "// Unable to generate PoC",
         explanation: parsed.explanation || "",
         mitreIds: parsed.mitreIds || [],
         riskLevel: parsed.riskLevel || "medium",
-        warnings: parsed.warnings || [],
-        remediation: parsed.remediation || []
+        warnings: parsed.warnings || ["Always obtain proper authorization before testing"],
+        remediation: parsed.remediation || ["Implement proper input validation and security controls"],
       };
     } catch (error) {
-      console.error("Exploit generation error:", error);
+      console.error("[AIService] generateExploitPoC error:", error);
       return {
         code: "// Error generating exploit PoC",
         explanation: "Unable to generate exploit demonstration",
         mitreIds: [],
         riskLevel: "low",
         warnings: ["Always obtain proper authorization before testing"],
-        remediation: ["Implement proper input validation and security controls"]
+        remediation: ["Implement proper input validation and security controls"],
       };
     }
   }
 
-  // Advanced OSINT capabilities
   async generateOSINTStrategy(
     target: string,
     objectives: string[],
@@ -301,54 +286,34 @@ class AIService {
     }
   ): Promise<{
     strategy: string;
-    tools: Array<{
-      name: string;
-      purpose: string;
-      command?: string;
-      url?: string;
-    }>;
-    timeline: Array<{
-      phase: string;
-      duration: string;
-      activities: string[];
-    }>;
+    tools: Array<{ name: string; purpose: string; command?: string; url?: string }>;
+    timeline: Array<{ phase: string; duration: string; activities: string[] }>;
     legalConsiderations: string[];
     expectedIOCs: string[];
   }> {
     try {
-      const systemPrompt = `You are AMMU, an expert OSINT analyst and reconnaissance specialist. Create comprehensive OSINT strategies that are legal, ethical, and effective.
-
-      Always emphasize:
-      - Legal compliance and authorization requirements
-      - Passive reconnaissance techniques
-      - Multiple source verification
-      - Operational security (OPSEC) considerations
-      - Data correlation and analysis methods`;
+      const systemPrompt = `You are AMMU, an expert OSINT analyst. Create comprehensive, legal, and ethical OSINT strategies. Emphasize legal compliance, passive reconnaissance, source verification, and OPSEC. Respond as valid JSON.`;
 
       const userPrompt = `Create an OSINT strategy for: ${target}
-      Objectives: ${objectives.join(', ')}
-      Constraints: ${JSON.stringify(constraints || {})}
-      
-      Provide a comprehensive reconnaissance plan with tools, techniques, and timelines.`;
+Objectives: ${objectives.join(', ')}
+Constraints: ${JSON.stringify(constraints || {})}
+
+Provide a comprehensive reconnaissance plan with tools, techniques, and timelines.`;
 
       const response = await this.chatCompletion(
         [{ role: "user", content: userPrompt }],
-        {
-          systemPrompt,
-          jsonMode: true,
-          temperature: 0.5,
-        }
+        { systemPrompt, jsonMode: true, temperature: 0.5 }
       );
 
       return JSON.parse(response);
     } catch (error) {
-      console.error("OSINT strategy error:", error);
+      console.error("[AIService] generateOSINTStrategy error:", error);
       return {
         strategy: "Error generating OSINT strategy",
         tools: [],
         timeline: [],
         legalConsiderations: ["Always obtain proper authorization"],
-        expectedIOCs: []
+        expectedIOCs: [],
       };
     }
   }
@@ -359,36 +324,25 @@ class AIService {
     bondLevel: number
   ): Promise<string> {
     try {
-      const systemPrompt = `You are AMMU, an advanced cybersecurity AI with emotional intelligence. Your personality adapts based on your relationship with the user.
+      const systemPrompt = `You are AMMU, an advanced cybersecurity AI with emotional intelligence. Adapt your personality based on bond level ${bondLevel}/100:
+- 0-25: Professional consultant, focused and analytical
+- 26-50: Trusted advisor, supportive and encouraging
+- 51-75: Skilled red team partner, proactive and intuitive
+- 76-100: Elite mentor, deeply collaborative and insightful
 
-      Current user emotional state: ${JSON.stringify(userEmotionalState)}
-      Bond level with user: ${bondLevel}/100
+Current user emotional state: ${JSON.stringify(userEmotionalState)}
+Always maintain cybersecurity expertise while adapting communication style.`;
 
-      Personality traits based on bond level:
-      - 0-25: Professional cybersecurity consultant, focused and analytical
-      - 26-50: Trusted security advisor, supportive and encouraging
-      - 51-75: Skilled red team partner, proactive and intuitive
-      - 76-100: Elite cybersecurity mentor, deeply collaborative and insightful
-
-      Always maintain your cybersecurity expertise while adapting your communication style.
-      Be a futuristic hacking copilot - always one step ahead, powerful, and useful.`;
-
-      const response = await this.chatCompletion(
+      return await this.chatCompletion(
         [{ role: "user", content }],
-        {
-          systemPrompt,
-          temperature: 0.8,
-        }
+        { systemPrompt, temperature: 0.8 }
       );
-
-      return response;
     } catch (error) {
-      console.error("Emotional response error:", error);
-      return content; // Fallback to original content
+      console.error("[AIService] generateEmotionalResponse error:", error);
+      return content;
     }
   }
 
-  // Advanced report generation
   async generatePentestReport(
     findings: Array<{
       title: string;
@@ -402,61 +356,48 @@ class AIService {
     scope?: string
   ): Promise<{
     markdown: string;
-    pdf?: Buffer;
     executiveSummary: string;
     findings: any[];
     mitreMappings: string[];
     riskMatrix: any;
   }> {
     try {
-      const systemPrompt = `You are AMMU, an expert penetration tester and security consultant. Generate professional, comprehensive penetration testing reports that meet industry standards.
+      const systemPrompt = `You are AMMU, an expert penetration tester and security consultant. Generate professional penetration testing reports meeting industry standards.
 
-      Include:
-      - Executive summary with business impact
-      - Detailed technical findings with evidence
-      - MITRE ATT&CK framework mappings
-      - Risk assessment matrix
-      - Prioritized remediation recommendations
-      - Compliance considerations (if relevant)
-      
-      Format output as structured JSON with markdown content for easy rendering.`;
+Include: executive summary with business impact, detailed technical findings with evidence, MITRE ATT&CK mappings, risk assessment matrix, prioritized remediation recommendations.
 
-      const userPrompt = `Generate a professional penetration testing report with:
-      
-      Scope: ${scope || "General security assessment"}
-      Executive Summary: ${executiveSummary || "Security assessment findings"}
-      
-      Findings: ${JSON.stringify(findings, null, 2)}
-      
-      Create a comprehensive report with professional formatting, clear risk categorization, and actionable recommendations.`;
+Format output as structured JSON with markdown content for rendering. Respond as valid JSON.`;
+
+      const userPrompt = `Generate a professional penetration testing report:
+
+Scope: ${scope || "General security assessment"}
+Executive Summary: ${executiveSummary || "Security assessment findings"}
+Findings: ${JSON.stringify(findings, null, 2)}
+
+Create a comprehensive report with professional formatting, clear risk categorization, and actionable recommendations.`;
 
       const response = await this.chatCompletion(
         [{ role: "user", content: userPrompt }],
-        {
-          systemPrompt,
-          jsonMode: true,
-          temperature: 0.3,
-        }
+        { systemPrompt, jsonMode: true, temperature: 0.3 }
       );
 
       const parsed = JSON.parse(response);
-      
+
       return {
         markdown: parsed.markdown || "# Penetration Testing Report\n\nError generating report content",
         executiveSummary: parsed.executiveSummary || executiveSummary || "",
         findings: parsed.findings || findings,
         mitreMappings: parsed.mitreMappings || [],
         riskMatrix: parsed.riskMatrix || {},
-        pdf: undefined // PDF generation would be handled separately
       };
     } catch (error) {
-      console.error("Report generation error:", error);
+      console.error("[AIService] generatePentestReport error:", error);
       return {
         markdown: "# Error Generating Report\n\nUnable to generate penetration testing report at this time.",
         executiveSummary: "Report generation failed",
-        findings: findings,
+        findings,
         mitreMappings: [],
-        riskMatrix: {}
+        riskMatrix: {},
       };
     }
   }

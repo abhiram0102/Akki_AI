@@ -21,6 +21,9 @@ const upload = multer({
 });
 
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key";
+if (!process.env.JWT_SECRET) {
+  console.warn("[SECURITY WARNING] JWT_SECRET env var is not set — using insecure default. Set JWT_SECRET in your environment.");
+}
 
 // Validation schemas
 const loginSchema = z.object({
@@ -606,7 +609,7 @@ app.put("/api/protected/profile", async (req, res) => {
 });
 
 // Coding workspace routes
-app.post("/api/coding/analyze", async (req, res) => {
+app.post("/api/coding/analyze", authMiddleware, async (req, res) => {
   try {
     const { code, language } = req.body;
     
@@ -654,7 +657,7 @@ Provide your analysis in the following JSON format:
   }
 });
 
-app.post("/api/coding/generate-exploit", async (req, res) => {
+app.post("/api/coding/generate-exploit", authMiddleware, async (req, res) => {
   try {
     const { code, exploitType, language } = req.body;
     
