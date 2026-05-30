@@ -156,6 +156,7 @@ export const useChat = create<ChatStore>((set, get) => ({
                     m.id === streamMsgId ? { ...m, isStreaming: false } : m
                   ),
                   isStreaming: false,
+                  currentSessionId: evt.sessionId ?? state.currentSessionId,
                 }));
               }
             } catch { /* skip malformed lines */ }
@@ -178,7 +179,7 @@ export const useChat = create<ChatStore>((set, get) => ({
           emotionalTone,
         });
 
-        const data = response?.data ?? {};
+        const data = response ?? {};
         const nextSessionId = data.sessionId ?? get().currentSessionId ?? null;
         const nextPlan = data.agentPlan ?? get().currentPlan ?? null;
 

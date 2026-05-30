@@ -63,8 +63,8 @@ class AgentService {
       // Get conversation history
       const recentMessages = await storage.getSessionMessages(sessionId, 10);
       
-      // Determine if this requires RAG or tool usage
-      const intent = await this.analyzeIntent(message, recentMessages);
+      // Determine intent via fast keyword-based classifier (no Gemini call needed)
+      const intent = this.analyzeIntent(message, recentMessages);
       
       let agentResponse: AgentResponse = {
         content: "",
@@ -92,14 +92,8 @@ class AgentService {
           break;
       }
       
-      // Personalize response based on emotional state
+      // Determine response tone from emotional state (no extra Gemini call)
       if (emotionalState) {
-        agentResponse.content = await emotionalAI.generatePersonalizedResponse(
-          userId,
-          agentResponse.content,
-          message
-        );
-        
         agentResponse.emotionalTone = this.determineResponseTone(emotionalState, intent.type);
       }
       
@@ -117,60 +111,60 @@ class AgentService {
     }
   }
 
-  private async analyzeIntent(message: string, recentMessages: any[]): Promise<{
+  private analyzeIntent(message: string, _recentMessages: any[]): {
     type: "rag_query" | "tool_execution" | "planning" | "casual_chat";
     confidence: number;
     entities: any;
-  }> {
-    try {
-      const conversationContext = recentMessages
-        .slice(-5)
-        .map(m => `${m.role}: ${m.content}`)
-        .join('\n');
-      
-      const systemPrompt = `You are an intent classifier for a cybersecurity AI assistant. Analyze the user's message and classify the intent.
+  } {
+    const lower = message.toLowerCase();
 
-      Intent types:
-      1. rag_query: User asking for information that might be in documents (CVEs, vulnerabilities, procedures)
-      2. tool_execution: User wants to run security tools (nmap, domain intel, etc.)
-      3. planning: User wants to plan an attack chain, investigation, or security assessment
-      4. casual_chat: General conversation, greetings, or non-technical questions
-      
-      Consider the conversation context and respond in JSON format:
-      {
-        "type": "intent_type",
-        "confidence": 0.95,
-        "entities": {
-          "targets": ["192.168.1.1"],
-          "tools": ["nmap"],
-          "topics": ["CVE-2024-1234"],
-          "actions": ["scan", "analyze"]
-        }
-      }`;
+    // ── Tool execution signals ────────────────────────────────────────────────
+    const toolKeywords = [
+      "nmap", "port scan", "port-scan", "scan ports", "scan the", "run nmap",
+      "whois", "dns lookup", "dns record", "nslookup", "dig ",
+      "domain intel", "subdomain", "shodan", "traceroute", "ping "
+    ];
+    const hasToolSignal = toolKeywords.some(k => lower.includes(k));
 
-      const response = await aiService.chatCompletion(
-        [{ role: "user", content: `Context:\n${conversationContext}\n\nUser message: ${message}` }],
-        {
-          systemPrompt,
-          jsonMode: true,
-          temperature: 0.3
+    // Also detect IP addresses or domains with an action verb
+    const hasIp = /\b(?:\d{1,3}\.){3}\d{1,3}\b/.test(message);
+    const hasDomainAction =
+      /\b(scan|lookup|check|query|enumerate|recon|probe)\b/.test(lower) &&
+      /\b[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\b/.test(message);
+
+    if (hasToolSignal || (hasIp && /\b(scan|check|ping|probe)\b/.test(lower)) || hasDomainAction) {
+      return {
+        type: "tool_execution",
+        confidence: 0.9,
+        entities: {
+          targets: message.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [],
+          domains: message.match(/\b[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.([a-zA-Z]{2,})\b/g) || [],
+          tools: toolKeywords.filter(k => lower.includes(k))
         }
-      );
-      
-      const parsed = JSON.parse(response);
-      return {
-        type: parsed.type || "casual_chat",
-        confidence: parsed.confidence || 0.5,
-        entities: parsed.entities || {}
-      };
-    } catch (error) {
-      console.error("Intent analysis error:", error);
-      return {
-        type: "casual_chat",
-        confidence: 0.5,
-        entities: {}
       };
     }
+
+    // ── Planning signals ──────────────────────────────────────────────────────
+    const planKeywords = [
+      "attack chain", "attack plan", "pentest plan", "penetration test plan",
+      "create a plan", "build a plan", "plan for", "multi-step", "step by step attack",
+      "red team plan", "assessment plan", "exploit chain"
+    ];
+    if (planKeywords.some(k => lower.includes(k))) {
+      return { type: "planning", confidence: 0.85, entities: {} };
+    }
+
+    // ── RAG / document query signals ─────────────────────────────────────────
+    const ragKeywords = [
+      "according to", "in the document", "in your knowledge", "from the report",
+      "what does the", "what did the report", "based on the", "search your"
+    ];
+    if (ragKeywords.some(k => lower.includes(k))) {
+      return { type: "rag_query", confidence: 0.8, entities: {} };
+    }
+
+    // ── Default: casual chat / general cybersecurity question ─────────────────
+    return { type: "casual_chat", confidence: 0.7, entities: {} };
   }
 
   private async handleRAGQuery(message: string, entities: any): Promise<AgentResponse> {
@@ -266,33 +260,35 @@ class AgentService {
 
   private async handleCasualChat(message: string, emotionalState: any): Promise<AgentResponse> {
     try {
-      const systemPrompt = `You are Ammu, a cybersecurity AI assistant. The user is having a casual conversation with you.
+      const systemPrompt = `You are AKKI, an advanced cybersecurity AI assistant and red team operator.
       
       Your personality:
-      - Professional but friendly
-      - Knowledgeable about cybersecurity
-      - Supportive and helpful
-      - Emotionally aware
+      - Professional, precise, and methodical
+      - Deep expertise in offensive and defensive security
+      - Supportive and educational — explain your reasoning
+      - Cybersecurity-focused: reference MITRE ATT&CK, CVEs, and real techniques when relevant
       
-      Respond naturally while staying in character as a cybersecurity expert.`;
+      Respond naturally and in character as a senior cybersecurity professional.`;
       
       const response = await aiService.chatCompletion(
         [{ role: "user", content: message }],
-        {
-          systemPrompt,
-          temperature: 0.8
-        }
+        { systemPrompt, temperature: 0.8 }
       );
       
-      return {
-        content: response,
-        ragUsed: false,
-        sources: []
-      };
+      return { content: response, ragUsed: false, sources: [] };
     } catch (error) {
       console.error("Casual chat error:", error);
+      const msg = error instanceof Error ? error.message : "";
+      // Show a clear rate-limit message instead of a fake greeting
+      if (msg.includes("RATE_LIMIT_DAILY") || msg.includes("429") || msg.includes("quota")) {
+        return {
+          content: "⚠️ **AI Rate Limit Reached**\n\nThe Gemini API daily quota for this project has been exhausted. Normal AI responses will resume when the quota resets (typically within 24 hours).\n\nIn the meantime, you can still:\n- Browse the OSINT, Red Team, and Reports sections\n- Upload documents to the knowledge base\n- View past conversations\n\nIf this is blocking critical work, consider upgrading to a paid Gemini API plan.",
+          ragUsed: false,
+          sources: []
+        };
+      }
       return {
-        content: "Hello! I'm here to help with your cybersecurity needs. What can I assist you with today?",
+        content: "I encountered a technical issue processing your message. Please try again.",
         ragUsed: false,
         sources: []
       };

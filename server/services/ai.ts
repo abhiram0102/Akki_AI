@@ -11,6 +11,44 @@ const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
 const DEFAULT_MODEL = "gemini-2.0-flash";
 const EMBEDDING_MODEL = "text-embedding-004";
 
+// Rate-limit retry helper.
+// Only retries per-MINUTE limits (quotaId contains "PerMinute").
+// Daily-limit 429s fail fast since waiting won't help until the next day.
+async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 2): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastError = err;
+      const status = err?.status ?? err?.statusCode;
+      if (status === 429) {
+        // Check if this is a daily limit — don't retry, fail fast
+        const isDailyLimit = err?.errorDetails?.some((d: any) =>
+          d?.violations?.some((v: any) => v?.quotaId?.includes("PerDay"))
+        );
+        if (isDailyLimit) {
+          throw new Error("RATE_LIMIT_DAILY: Gemini API daily quota exhausted. Responses will use fallback mode until the quota resets.");
+        }
+        // Per-minute limit — honour Retry-After, cap at 8s
+        let waitMs = 3000;
+        try {
+          const detail = err?.errorDetails?.find((d: any) => d["@type"]?.endsWith("RetryInfo"));
+          if (detail?.retryDelay) {
+            const secs = parseFloat(detail.retryDelay.replace("s", ""));
+            waitMs = Math.min(Math.ceil(secs * 1000) + 200, 8000);
+          }
+        } catch { /* ignore */ }
+        console.warn(`[AIService] 429 per-minute rate-limit (attempt ${attempt + 1}/${maxAttempts}) — waiting ${waitMs}ms`);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
+}
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -40,51 +78,49 @@ class AIService {
     messages: ChatMessage[],
     options: ChatCompletionOptions = {}
   ): Promise<string> {
+    const {
+      model = DEFAULT_MODEL,
+      temperature,
+      maxTokens,
+      systemPrompt,
+      jsonMode = false,
+    } = options;
+
+    if (!genAI) throw new Error("GEMINI_API_KEY is not configured");
+
+    // Separate system messages from conversation history
+    const systemMessages = messages.filter(m => m.role === "system");
+    const conversationMessages = messages.filter(m => m.role !== "system");
+
+    const combinedSystemInstruction = [
+      systemPrompt,
+      ...systemMessages.map(m => m.content),
+    ].filter(Boolean).join("\n\n") || undefined;
+
+    const lastMessage = conversationMessages[conversationMessages.length - 1];
+    if (!lastMessage) throw new Error("No user message to send");
+
+    const history = conversationMessages.slice(0, -1).map((msg) => ({
+      role: msg.role === "assistant" ? "model" : "user",
+      parts: [{ text: msg.content }],
+    }));
+
+    const geminiModel = genAI.getGenerativeModel({
+      model,
+      ...(combinedSystemInstruction ? { systemInstruction: combinedSystemInstruction } : {}),
+      generationConfig: {
+        responseMimeType: jsonMode ? "application/json" : "text/plain",
+        ...(maxTokens !== undefined ? { maxOutputTokens: maxTokens } : {}),
+        ...(temperature !== undefined ? { temperature } : {}),
+      },
+    });
+
     try {
-      const {
-        model = DEFAULT_MODEL,
-        temperature,
-        maxTokens,
-        systemPrompt,
-        jsonMode = false,
-      } = options;
-
-      if (!genAI) throw new Error("GEMINI_API_KEY is not configured");
-
-      // Separate system messages from conversation history
-      const systemMessages = messages.filter(m => m.role === "system");
-      const conversationMessages = messages.filter(m => m.role !== "system");
-
-      // Merge explicit systemPrompt with any system-role messages
-      const combinedSystemInstruction = [
-        systemPrompt,
-        ...systemMessages.map(m => m.content),
-      ].filter(Boolean).join("\n\n") || undefined;
-
-      const geminiModel = genAI.getGenerativeModel({
-        model,
-        ...(combinedSystemInstruction ? { systemInstruction: combinedSystemInstruction } : {}),
-        generationConfig: {
-          responseMimeType: jsonMode ? "application/json" : "text/plain",
-          ...(maxTokens !== undefined ? { maxOutputTokens: maxTokens } : {}),
-          ...(temperature !== undefined ? { temperature } : {}),
-        },
+      return await withRetry(async () => {
+        const chat = geminiModel.startChat({ history });
+        const result = await chat.sendMessage(lastMessage.content);
+        return result.response.text();
       });
-
-      // Build chat history — Gemini only supports "user" and "model" roles
-      const history = conversationMessages.slice(0, -1).map((msg) => ({
-        role: msg.role === "assistant" ? "model" : "user",
-        parts: [{ text: msg.content }],
-      }));
-
-      const lastMessage = conversationMessages[conversationMessages.length - 1];
-      if (!lastMessage) {
-        throw new Error("No user message to send");
-      }
-
-      const chat = geminiModel.startChat({ history });
-      const result = await chat.sendMessage(lastMessage.content);
-      return result.response.text();
     } catch (error) {
       console.error("[AIService] chatCompletion error:", error);
       throw new Error(`Chat completion failed: ${error instanceof Error ? error.message : "Unknown error"}`);

@@ -140,6 +140,110 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ── Streaming chat endpoint (SSE) ────────────────────────────────────────────
+  app.post("/api/chat/stream", authMiddleware, async (req, res) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ message: "User not authenticated" });
+      }
+
+      const data = chatMessageSchema.parse(req.body);
+      const userId = (req.user as import("@shared/schema").User).id;
+      let sessionId = data.sessionId;
+
+      if (!sessionId) {
+        const newSession = await storage.createSession({
+          ownerId: userId,
+          title: `Chat Session - ${new Date().toLocaleString()}`,
+          mode: "chat",
+          context: { workspace: "chat" }
+        });
+        sessionId = newSession.id;
+      }
+
+      // SSE headers
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
+
+      const send = (payload: object) => {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      };
+
+      // Store user message
+      await storage.createMessage({
+        sessionId,
+        role: "user",
+        content: data.content,
+        metadata: { voiceInput: data.voiceInput || false, emotionalTone: data.emotionalTone }
+      });
+
+      // Update emotional state if tone provided
+      if (data.emotionalTone) {
+        await emotionalAI.updateEmotionalBond(userId, data.emotionalTone, data.content);
+      }
+
+      // Emit agent badge immediately so UI shows activity
+      send({ type: "agent", agent: "planner", agentName: "NEXUS", agentRole: "Orchestration" });
+
+      // Process through agent service
+      let agentResponse;
+      try {
+        agentResponse = await agentService.processMessage({
+          message: data.content,
+          sessionId,
+          userId,
+          voiceInput: data.voiceInput || false,
+          context: {
+            emotionalTone: data.emotionalTone,
+            workspace: "chat",
+            capabilities: ["multimodal", "exploits", "osint", "reports", "rag"]
+          }
+        });
+      } catch (agentError) {
+        console.error("Agent Service Error (stream):", agentError);
+        agentResponse = {
+          content: "I encountered an issue processing your request. Please try rephrasing or providing more context.",
+          ragUsed: false,
+          sources: [] as string[]
+        };
+      }
+
+      const content = agentResponse.content;
+
+      // Stream content in ~20-char chunks with slight delay for token-feel
+      const CHUNK = 20;
+      for (let i = 0; i < content.length; i += CHUNK) {
+        send({ type: "token", text: content.slice(i, i + CHUNK) });
+        await new Promise(r => setTimeout(r, 8));
+      }
+
+      // Store assistant message
+      await storage.createMessage({
+        sessionId,
+        role: "assistant",
+        content,
+        toolCalls: agentResponse.toolCalls || [],
+        metadata: {
+          ragUsed: agentResponse.ragUsed,
+          sources: agentResponse.sources,
+          emotionalTone: agentResponse.emotionalTone
+        }
+      });
+
+      send({ type: "done", sessionId });
+      res.end();
+    } catch (error) {
+      console.error("Stream chat error:", error);
+      try {
+        res.write(`data: ${JSON.stringify({ type: "error", message: error instanceof Error ? error.message : "Stream failed" })}\n\n`);
+        res.end();
+      } catch { /* already ended */ }
+    }
+  });
+
   // Protected routes
   app.use("/api/protected", authMiddleware);
 
@@ -257,7 +361,7 @@ Please try rephrasing your request or provide more specific details about what y
       
       // Store voice interaction
       const voiceInteraction = await storage.createVoiceInteraction({
-        sessionId: data.sessionId || "",
+        sessionId: data.sessionId || undefined,
         userId,
         transcription: transcription.text,
         audioData: data.audioData,
