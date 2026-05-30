@@ -64,7 +64,7 @@ const toolExecutionSchema = z.object({
 });
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  
+
   // Authentication routes
   app.post("/api/auth/register", async (req, res) => {
     try {
