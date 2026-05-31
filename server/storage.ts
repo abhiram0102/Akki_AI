@@ -28,6 +28,7 @@ export interface IStorage {
   createChunk(chunk: InsertChunk): Promise<Chunk>;
   getDocumentChunks(documentId: string): Promise<Chunk[]>;
   searchChunks(query: string, limit?: number): Promise<Chunk[]>;
+  getAllChunksWithEmbeddings(): Promise<Chunk[]>;
   deleteDocumentChunks(documentId: string): Promise<void>;
 
   // Session operations
@@ -153,12 +154,18 @@ export class DatabaseStorage implements IStorage {
   }
 
   async searchChunks(query: string, limit: number = 10): Promise<Chunk[]> {
-    // Note: This is a simple text search. In production, you'd use vector similarity
     return await db
       .select()
       .from(chunks)
       .where(like(chunks.content, `%${query}%`))
       .limit(limit);
+  }
+
+  async getAllChunksWithEmbeddings(): Promise<Chunk[]> {
+    return await db
+      .select()
+      .from(chunks)
+      .where(isNotNull(chunks.embedding));
   }
 
   async deleteDocumentChunks(documentId: string): Promise<void> {

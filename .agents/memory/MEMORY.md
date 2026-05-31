@@ -4,3 +4,4 @@
 - [Two-database split](two-database.md) — shell env has Replit helium Postgres; .env has Neon. tsx --env-file overrides shell var, so server and seed scripts must explicitly use Neon URL or source .env.
 - [Gemini model availability](gemini-models.md) — Only gemini-2.0-flash is confirmed working for this API key; gemini-1.5-flash and gemini-1.5-flash-8b return 404 on v1beta. Don't switch models on retry.
 - [Gemini quota detection](gemini-quota.md) — Daily 429s must fail fast (check violations[].quotaId contains "PerDay"); per-minute 429s can be retried after delay. withRetry must distinguish both cases.
+- [Ollama + RAG integration](ollama-rag.md) — multi-provider AI (Ollama primary/Gemini fallback), ChromaDB replaced with PostgreSQL cosine similarity; env vars: AI_PROVIDER, OLLAMA_URL, OLLAMA_*_MODEL.

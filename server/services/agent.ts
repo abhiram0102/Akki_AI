@@ -272,17 +272,16 @@ class AgentService {
       
       const response = await aiService.chatCompletion(
         [{ role: "user", content: message }],
-        { systemPrompt, temperature: 0.8 }
+        { systemPrompt, temperature: 0.8, agentRole: "chat" }
       );
       
       return { content: response, ragUsed: false, sources: [] };
     } catch (error) {
       console.error("Casual chat error:", error);
       const msg = error instanceof Error ? error.message : "";
-      // Show a clear rate-limit message instead of a fake greeting
       if (msg.includes("RATE_LIMIT_DAILY") || msg.includes("429") || msg.includes("quota")) {
         return {
-          content: "⚠️ **AI Rate Limit Reached**\n\nThe Gemini API daily quota for this project has been exhausted. Normal AI responses will resume when the quota resets (typically within 24 hours).\n\nIn the meantime, you can still:\n- Browse the OSINT, Red Team, and Reports sections\n- Upload documents to the knowledge base\n- View past conversations\n\nIf this is blocking critical work, consider upgrading to a paid Gemini API plan.",
+          content: "⚠️ **AI Rate Limit Reached**\n\nThe Gemini daily quota is exhausted. **To switch to local Ollama models** (free, unlimited):\n\n1. Install Ollama on your machine: `curl -fsSL https://ollama.ai/install.sh | sh`\n2. Pull models: `ollama pull llama3.2 && ollama pull nomic-embed-text`\n3. Expose it (if on different machine): `ngrok http 11434`\n4. Set `OLLAMA_URL` and `AI_PROVIDER=ollama` in your environment\n5. Restart the server\n\nGemini quota typically resets within 24 hours.",
           ragUsed: false,
           sources: []
         };
@@ -360,7 +359,8 @@ class AgentService {
         {
           systemPrompt,
           jsonMode: true,
-          temperature: 0.4
+          temperature: 0.4,
+          agentRole: "redteam"
         }
       );
       
