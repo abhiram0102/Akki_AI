@@ -1,4 +1,4 @@
-import { ChromaClient, type IEmbeddingFunction } from "chromadb";
+import { ChromaClient, type EmbeddingFunction as IEmbeddingFunction } from "chromadb";
 import pdf from "pdf-parse";
 import { storage } from "../storage";
 import { aiService } from "./ai";

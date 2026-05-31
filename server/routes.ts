@@ -348,36 +348,80 @@ Please try rephrasing your request or provide more specific details about what y
     }
   });
 
-  // Voice routes
-  app.post("/api/protected/voice/transcribe", async (req, res) => {
-    try {
-      if (!req.user) {
-        return res.status(401).json({ message: "User not authenticated" });
+  // Voice routes — accepts multipart/form-data (file upload) OR JSON {audioData: base64}
+  app.post(
+    "/api/protected/voice/transcribe",
+    (req, res, next) => {
+      const ct = req.headers["content-type"] || "";
+      if (ct.includes("multipart/form-data")) {
+        upload.single("file")(req, res, next);
+      } else {
+        next();
       }
-      const userId = (req.user as import("@shared/schema").User).id;
-      const data = voiceTranscriptionSchema.parse(req.body);
-      
-      const transcription = await voiceService.transcribeAudio(data.audioData);
-      
-      // Store voice interaction
-      const voiceInteraction = await storage.createVoiceInteraction({
-        sessionId: data.sessionId || undefined,
-        userId,
-        transcription: transcription.text,
-        audioData: data.audioData,
-        confidence: transcription.confidence,
-        emotionalTone: transcription.emotionalTone,
-        voicePattern: transcription.voicePattern,
-        wakeWordDetected: transcription.wakeWordDetected,
-        processingTime: transcription.processingTime
-      });
+    },
+    async (req, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ message: "User not authenticated" });
+        }
+        const userId = (req.user as import("@shared/schema").User).id;
 
-      res.json(voiceInteraction);
-    } catch (error) {
-      console.error("Voice transcription error:", error);
-      res.status(500).json({ message: error instanceof Error ? error.message : "Transcription failed" });
+        // Determine audio source: multipart file OR JSON base64
+        let audioBuffer: Buffer;
+        let mimeType = "audio/webm";
+        let sessionId: string | undefined;
+
+        if ((req as any).file) {
+          // Multipart upload
+          audioBuffer = (req as any).file.buffer as Buffer;
+          mimeType = (req as any).file.mimetype || req.body?.mimeType || "audio/webm";
+          sessionId = req.body?.sessionId || undefined;
+        } else if (req.body?.audioData) {
+          // JSON base64
+          try {
+            const data = voiceTranscriptionSchema.parse(req.body);
+            audioBuffer = Buffer.from(data.audioData, "base64");
+            sessionId = data.sessionId || undefined;
+          } catch (parseErr) {
+            return res.status(400).json({ message: "Invalid request body" });
+          }
+        } else {
+          return res.status(400).json({ message: "No audio data provided" });
+        }
+
+        const transcription = await voiceService.transcribeAudio(audioBuffer!, mimeType);
+
+        // Store voice interaction only when we have a valid session UUID
+        if (sessionId) {
+          try {
+            await storage.createVoiceInteraction({
+              sessionId,
+              userId,
+              transcription: transcription.text,
+              audioData: audioBuffer.toString("base64"),
+              confidence: transcription.confidence,
+              emotionalTone: transcription.emotionalTone,
+              voicePattern: transcription.voicePattern,
+              wakeWordDetected: transcription.wakeWordDetected,
+              processingTime: transcription.processingTime,
+            });
+          } catch (dbErr) {
+            console.warn("[Voice] DB write failed (non-fatal):", dbErr);
+          }
+        }
+
+        res.json({
+          transcription: transcription.text,
+          emotionalTone: transcription.emotionalTone,
+          confidence: transcription.confidence,
+          wakeWordDetected: transcription.wakeWordDetected,
+        });
+      } catch (error) {
+        console.error("Voice transcription error:", error);
+        res.status(500).json({ message: error instanceof Error ? error.message : "Transcription failed" });
+      }
     }
-  });
+  );
 
   app.post("/api/protected/voice/synthesize", async (req, res) => {
     try {

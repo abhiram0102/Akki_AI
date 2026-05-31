@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useChat } from "@/store/chat";
 import { useVoice } from "@/hooks/use-voice";
 import { useEmotionalState } from "@/store/emotional-state";
@@ -26,9 +26,14 @@ export default function MessageInput({ audioInitialized, audioContext }: Message
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const { sendMessage, isLoading, isStreaming, activeAgent } = useChat();
-  const { isListening, toggleListening, isActive } = useVoice(audioContext);
+  const { isListening, isActive, liveTranscript, toggleListening } = useVoice(audioContext);
   const { emotionalState } = useEmotionalState();
   const { toast } = useToast();
+
+  // Show live voice transcript in the textarea as the user speaks
+  useEffect(() => {
+    if (liveTranscript) setMessage(liveTranscript);
+  }, [liveTranscript]);
 
   const isBusy = isLoading || isStreaming;
 
@@ -186,16 +191,24 @@ export default function MessageInput({ audioInitialized, audioContext }: Message
               <button
                 type="button"
                 onClick={toggleListening}
-                disabled={!isActive || !audioInitialized}
+                disabled={isBusy}
                 className={`p-1.5 rounded-lg text-xs border transition-all disabled:opacity-40 ${
                   isListening
                     ? "border-green-400/50 bg-green-400/10 text-green-400 animate-pulse"
+                    : isActive
+                    ? "border-cyan-400/30 text-cyan-400/70 hover:text-cyan-400"
                     : "border-white/10 text-gray-500 hover:text-gray-300"
                 }`}
-                title={isListening ? "Stop listening" : "Voice input"}
+                title={
+                  isListening
+                    ? "Stop listening (click to cancel)"
+                    : isActive
+                    ? "Voice input (ready)"
+                    : "Voice input (click to activate)"
+                }
                 data-testid="button-voice-input"
               >
-                <i className={`fas fa-microphone ${isListening ? "text-green-400" : ""}`} />
+                <i className={`fas fa-microphone${isListening ? "" : "-slash"} ${isListening ? "text-green-400" : ""}`} />
               </button>
 
               {/* Stream toggle */}

@@ -211,7 +211,7 @@ export default function ContextPanel() {
                 }`}>
                   {step.description}
                 </span>
-                {step.requiresApproval && (
+                {(step as any).requiresApproval && (
                   <i className="fas fa-exclamation-triangle text-cyber-amber" />
                 )}
               </div>
