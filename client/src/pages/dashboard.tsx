@@ -5,6 +5,9 @@ import NavigationRail from "@/components/layout/navigation-rail";
 import MainContent from "@/components/layout/main-content";
 import ContextPanel from "@/components/layout/context-panel";
 import CommandPalette from "@/components/ui/command-palette";
+import { MotionDemo } from "@/components/ui/motion-demo";
+import { motion } from "framer-motion";
+import { motionPresets } from "@/motion";
 import { useVoice } from "@/hooks/use-voice";
 
 interface ClientDashboardProps {
@@ -52,26 +55,62 @@ function ClientOnlyDashboard({ audioContext, setAudioContext }: ClientDashboardP
 
   if (isLoading || !user) {
     return (
-      <div className="min-h-screen terminal-bg flex items-center justify-center">
-        <div className="glass rounded-lg p-8 text-center">
-          <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gradient-to-br from-cyber-blue to-cyber-green flex items-center justify-center animate-pulse">
-            <i className="fas fa-brain text-white text-2xl" />
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: -20 }}
+        className="min-h-screen terminal-bg flex items-center justify-center"
+      >
+        <motion.div
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          className="glass rounded-lg p-8 text-center space-y-6"
+        >
+          <div className="w-20 h-20 mx-auto mb-4 rounded-full bg-gradient-to-br from-cyber-blue to-cyber-green flex items-center justify-center">
+            <motion.div
+              variants={motionPresets.pulse}
+              initial="initial"
+              animate="animate"
+              className="w-12 h-12 bg-cyan-400/20 rounded-full flex items-center justify-center border border-cyan-400/30"
+            >
+              <i className="fas fa-brain text-white text-xl" />
+            </motion.div>
           </div>
-          <p className="text-white font-mono font-bold tracking-wider">LOADING AKKI AI...</p>
-        </div>
-      </div>
+          <motion.h1
+            variants={motionPresets.fadeInUp}
+            initial="initial"
+            animate="animate"
+            className="text-white font-mono font-bold tracking-wider text-2xl"
+          >
+            LOADING AKKI AI...
+          </motion.h1>
+          <motion.p
+            variants={motionPresets.fadeInUp}
+            initial="initial"
+            animate="animate"
+            className="text-gray-300 text-sm"
+          >
+            Initializing neural pathways...
+          </motion.p>
+          <MotionDemo className="max-w-md mx-auto mt-6" />
+        </motion.div>
+      </motion.div>
     );
   }
 
   return (
-    <div className="h-screen terminal-bg text-white overflow-hidden" data-testid="dashboard">
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      className="h-screen terminal-bg text-white overflow-hidden" data-testid="dashboard"
+    >
       <div className="flex h-full">
         <NavigationRail />
         <MainContent onInitAudio={handleInitAudio} audioInitialized={!!audioContext} audioContext={audioContext} />
         <ContextPanel />
       </div>
       <CommandPalette />
-    </div>
+    </motion.div>
   );
 }
 
