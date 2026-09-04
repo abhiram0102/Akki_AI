@@ -51,6 +51,7 @@ async def init_db():
     from backend.models import (  # noqa: F401
         User, Session, Message, Document, Chunk, Memory,
         ToolRun, Finding, VoiceInteraction, WorkspaceRecord,
+        BrainVisitedPage, BrainFrontier, BrainDeadLetter, BrainStats
     )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

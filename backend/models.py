@@ -188,3 +188,46 @@ class WorkspaceRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped["User | None"] = relationship("User", back_populates="workspace_records")
+
+
+class BrainVisitedPage(Base):
+    """A page the brain crawler has already fetched — crawl state, not
+    knowledge; the extracted knowledge itself lives in Neo4j."""
+    __tablename__ = "brain_visited_pages"
+
+    url: Mapped[str] = mapped_column(Text, primary_key=True)
+    concept: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    sentences_learned: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    visited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BrainFrontier(Base):
+    """URLs discovered but not yet crawled."""
+    __tablename__ = "brain_frontier"
+
+    url: Mapped[str] = mapped_column(Text, primary_key=True)
+    concept: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BrainDeadLetter(Base):
+    """A URL that failed 3 fetch attempts — stops being retried automatically."""
+    __tablename__ = "brain_dead_letters"
+
+    url: Mapped[str] = mapped_column(Text, primary_key=True)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    error: Mapped[str] = mapped_column(Text, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class BrainStats(Base):
+    """Single-row crawl-progress counter, avoids full-table scans on every status query."""
+    __tablename__ = "brain_stats"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: "singleton")
+    total_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_sentences: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
