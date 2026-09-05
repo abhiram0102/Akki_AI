@@ -79,24 +79,27 @@ async def infer_links(concept: str, limit: int = 5, min_count: int = MIN_EDGE_CO
     surfaced here as a *derived* link of A — something the brain reasons its
     way to rather than one it looked up.
 
-    `via` is left as None: v1 doesn't track which intermediate node(s) a
-    candidate was reached through, only that it was reached at depth 2. That
-    intermediate-tracking is a reasonable future enhancement, not required
-    for this reasoning step to be useful."""
-    associations = await _top_associations(concept, min_count=min_count)
-    direct = {a["word"] for a in associations}
+    Candidates are ranked by path strength (g2(A->B) * g2(B->C)) rather than
+    hop count, so the strongest derived connections surface first instead of
+    alphabetical noise. `via` names the intermediate concept (B) that produced
+    the best (max) strength for each candidate."""
+    direct = await _top_associations(concept, min_count=min_count)
+    direct_words = {d["word"] for d in direct}
 
-    reached = await _reachable_with_depth(concept, max_depth=2, min_count=min_count)
-    candidates = sorted(
-        (word for word, depth in reached.items()
-         if depth == 2 and word not in direct and word != concept),
-        key=lambda word: (reached[word], word),
-    )
+    best: dict[str, dict] = {}
+    for b in direct[:12]:
+        g2ab = b["g2"]
+        seconds = await _top_associations(b["word"], min_count=min_count)
+        for s in seconds:
+            c = s["word"]
+            if c == concept or c in direct_words:
+                continue
+            strength = g2ab * s["g2"]
+            if c not in best or strength > best[c]["strength"]:
+                best[c] = {"concept": c, "via": b["word"], "strength": strength, "derived": True}
 
-    return [
-        {"concept": word, "via": None, "strength": 1.0 / reached[word], "derived": True}
-        for word in candidates[:limit]
-    ]
+    ranked = sorted(best.values(), key=lambda d: d["strength"], reverse=True)
+    return ranked[:limit]
 
 
 async def discover(concept: str, concept2: str | None = None) -> dict:
