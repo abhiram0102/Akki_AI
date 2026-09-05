@@ -53,6 +53,7 @@ import { AdaptiveDpr, OrbitControls } from "@react-three/drei";
 import { Bloom, ChromaticAberration, EffectComposer } from "@react-three/postprocessing";
 import NeuronField from "./NeuronField";
 import Signals, { type SignalEdge } from "./Signals";
+import BrainShell from "./BrainShell";
 import { regionForConcept } from "./regions";
 import { generateBrainPoints } from "./proceduralBrain";
 
@@ -335,7 +336,17 @@ const BrainScene = forwardRef<BrainSceneHandle, BrainSceneProps>(function BrainS
     <div className={className} style={{ width: "100%", height: "100%" }}>
       <Canvas
         dpr={[1, 2]}
-        frameloop="demand"
+        // NOTE: was "demand" per the original spec, but this scene's entire
+        // visual language is continuous shader-driven animation (neuron
+        // spawn-in easing, signal pulses, auto-rotate) -- none of that reads
+        // as "uTime" without a render actually happening every frame, and
+        // "demand" only renders in response to an explicit invalidate() call
+        // (none of which existed anywhere in this scene). The practical
+        // effect was a frozen-looking/stuttery scene that made the whole
+        // Ask flow look stuck or broken even when the backend answered
+        // quickly. "always" is the correct mode for content that's meant to
+        // be continuously alive, not an idle-most-of-the-time UI.
+        frameloop="always"
         gl={{ antialias: true, alpha: false }}
         camera={{ position: [0, 0, 2.6], fov: 45, near: 0.05, far: 20 }}
       >
@@ -343,6 +354,9 @@ const BrainScene = forwardRef<BrainSceneHandle, BrainSceneProps>(function BrainS
         <ambientLight intensity={0.15} />
 
         <ClockBridge elapsedRef={elapsedRef} />
+
+        {/* Outer silhouette + hemisphere seam -- gives the neuron cloud a perceivable boundary to sit inside. */}
+        <BrainShell />
 
         {/* Ambient backdrop: dense, dim, non-growing procedural cloud giving the brain its shape. */}
         <NeuronField points={ambientPoints} maxCount={ambientCount} baseSize={3.2} />
