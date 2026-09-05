@@ -455,6 +455,19 @@ export default function BrainPage() {
         <BrainFieldFallback nodes={nodes} edges={edges} reduced={reduced} loading={fallbackLoading} error={fallbackError} nodeById={nodeById} />
       )}
 
+      {/* CC BY 4.0 attribution -- required by the anatomical model's license (client/public/models/human-brain.glb). */}
+      {mode === "ask" && webglAvailable && (
+        <a
+          href="https://sketchfab.com/3d-models/human-brain-e073c2590bc24daaa7323f4daa5b7784"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ position: "absolute", left: 14, bottom: 10, zIndex: 4, fontSize: 10, color: COLORS.mist,
+            opacity: 0.55, textDecoration: "none", fontFamily: FONT }}
+        >
+          Brain model by Yash_Dandavate, CC BY 4.0
+        </a>
+      )}
+
       {/* floating glass query bar */}
       <div style={{ position: "absolute", left: "50%", bottom: 28, transform: "translateX(-50%)", zIndex: 4,
         width: "min(680px, calc(100% - 32px))", background: "rgba(13,21,38,.72)", backdropFilter: "blur(14px)",

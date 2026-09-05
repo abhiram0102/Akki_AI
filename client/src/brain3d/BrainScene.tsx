@@ -39,6 +39,7 @@
 
 import * as THREE from "three";
 import {
+  Suspense,
   forwardRef,
   useCallback,
   useEffect,
@@ -53,8 +54,8 @@ import { AdaptiveDpr, OrbitControls } from "@react-three/drei";
 import { Bloom, ChromaticAberration, EffectComposer } from "@react-three/postprocessing";
 import NeuronField from "./NeuronField";
 import Signals, { type SignalEdge } from "./Signals";
+import RealBrainMesh, { useBrainSurfacePoints } from "./RealBrainMesh";
 import { regionForConcept } from "./regions";
-import { generateBrainPoints } from "./proceduralBrain";
 
 export interface BrainSceneNode {
   id: string;
@@ -174,6 +175,19 @@ function ClockBridge({ elapsedRef }: { elapsedRef: MutableRefObject<number> }) {
   return null;
 }
 
+/**
+ * The ambient backdrop dust, sampled directly off the real brain mesh's
+ * surface (see RealBrainMesh.tsx) instead of the old procedural ellipsoid.
+ * Isolated in its own component (rather than computed in BrainScene's body)
+ * because `useBrainSurfacePoints` calls `useGLTF`, which suspends while the
+ * model loads — only this piece should suspend, not the whole scene.
+ */
+function AmbientBrainDust({ count }: { count: number }) {
+  const points = useBrainSurfacePoints(count);
+  if (!points) return null;
+  return <NeuronField points={points} maxCount={count} baseSize={3.2} />;
+}
+
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState<boolean>(() => {
     try {
@@ -214,7 +228,6 @@ const BrainScene = forwardRef<BrainSceneHandle, BrainSceneProps>(function BrainS
   const elapsedRef = useRef(0);
 
   const ambientCount = stream?.ambientCount ?? DEFAULT_AMBIENT_COUNT;
-  const ambientPoints = useMemo(() => generateBrainPoints(ambientCount), [ambientCount]);
 
   const maxNodes = stream?.maxNodes;
   const [state, setState] = useState<GraphState>(() =>
@@ -354,13 +367,15 @@ const BrainScene = forwardRef<BrainSceneHandle, BrainSceneProps>(function BrainS
 
         <ClockBridge elapsedRef={elapsedRef} />
 
-        {/* BrainShell (procedural wireframe boundary) pulled back out -- it
-            read as visual noise rather than a clean brain outline. Real
-            anatomical model integration is the plan (Task 11 in the design
-            spec), pending the actual model file. */}
-
-        {/* Ambient backdrop: dense, dim, non-growing procedural cloud giving the brain its shape. */}
-        <NeuronField points={ambientPoints} maxCount={ambientCount} baseSize={3.2} />
+        {/* Real anatomical brain mesh (translucent hologram shell) + ambient
+            dust sampled off its actual surface. Both depend on the GLTF load
+            (useGLTF suspends), isolated in their own Suspense boundary so
+            the rest of the scene (concept graph, signals, controls) never
+            waits on it. */}
+        <Suspense fallback={null}>
+          <RealBrainMesh />
+          <AmbientBrainDust count={ambientCount} />
+        </Suspense>
 
         {/* Live concept layer: the actual graph, capable of growing in via appendNodes(). */}
         <NeuronField
