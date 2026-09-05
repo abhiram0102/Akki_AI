@@ -196,13 +196,40 @@ export default function Signals({ edges, activePath, speed = 0.35, reducedMotion
 
   const geometryRef = useRef<THREE.BufferGeometry>(null);
 
+  // Capacity-headroom buffers, grown (never shrunk) as needed — mirrors the
+  // pattern NeuronField/BrainScene already use for the neuron buffers. This
+  // matters because THREE.BufferAttribute has no `.dispose()`, and swapping
+  // the object attached via `<primitive attach="attributes-position">` does
+  // NOT free the outgoing attribute's GPU buffer (only full geometry/
+  // renderer disposal does). Reallocating fresh attributes on every
+  // `ambientEdges.length` change (which fluctuates continuously during
+  // learn-on-demand graph growth — exactly this feature's core use case)
+  // would orphan a GPU buffer per distinct edge count visited in a session.
+  // Keeping one growable set of attributes, reused in place whenever the
+  // current edge count still fits, bounds that to the same rare "capacity
+  // ceiling exceeded" case NeuronField/BrainScene already accept.
+  const ambientBuffersRef = useRef<{
+    positionAttr: THREE.BufferAttribute;
+    arcAttr: THREE.BufferAttribute;
+    offsetAttr: THREE.BufferAttribute;
+    capacity: number; // vertex capacity (2 per edge)
+  } | null>(null);
+
   const { positionAttr, arcAttr, offsetAttr } = useMemo(() => {
-    const vertexCount = Math.max(ambientEdges.length * 2, 1);
-    return {
-      positionAttr: new THREE.BufferAttribute(new Float32Array(vertexCount * 3), 3),
-      arcAttr: new THREE.BufferAttribute(new Float32Array(vertexCount), 1),
-      offsetAttr: new THREE.BufferAttribute(new Float32Array(vertexCount), 1),
-    };
+    const neededVerts = Math.max(ambientEdges.length * 2, 1);
+    const prev = ambientBuffersRef.current;
+    if (!prev || neededVerts > prev.capacity) {
+      const capacity = Math.max(neededVerts, prev ? Math.ceil(prev.capacity * 1.5) : 0, 64);
+      ambientBuffersRef.current = {
+        positionAttr: new THREE.BufferAttribute(new Float32Array(capacity * 3), 3),
+        arcAttr: new THREE.BufferAttribute(new Float32Array(capacity), 1),
+        offsetAttr: new THREE.BufferAttribute(new Float32Array(capacity), 1),
+        capacity,
+      };
+    }
+    // Always non-null here: either it already was, or the branch above just set it.
+    return ambientBuffersRef.current!;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ambientEdges.length]);
 
   useEffect(() => {

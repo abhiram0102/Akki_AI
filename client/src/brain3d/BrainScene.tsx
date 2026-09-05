@@ -295,6 +295,23 @@ const BrainScene = forwardRef<BrainSceneHandle, BrainSceneProps>(function BrainS
 
   useImperativeHandle(ref, () => ({ appendNodes, updateActivations }), [appendNodes, updateActivations]);
 
+  // `.subarray()` returns a NEW view object on every call even when the
+  // underlying data hasn't changed — NeuronField's own effect keys off the
+  // referential identity of `points`/`activations`/`spawnTimes`, so passing
+  // fresh subarrays on every render (even ones that don't touch `state`,
+  // e.g. a `graph.edges`/`activePath`/`reducedMotion` change) would force
+  // its full O(count) copy loop to re-run for no reason. Memoizing on
+  // `state` keeps these stable across any render that doesn't actually
+  // change the underlying buffers.
+  const graphNeuronBuffers = useMemo(() => {
+    const { positions, activations, spawnTimes, count } = state.buffers;
+    return {
+      points: positions.subarray(0, count * 3),
+      activations: activations.subarray(0, count),
+      spawnTimes: spawnTimes.subarray(0, count),
+    };
+  }, [state]);
+
   const edgesForSignals = useMemo<SignalEdge[]>(() => {
     const { positions } = state.buffers;
     const { index } = state;
@@ -332,9 +349,9 @@ const BrainScene = forwardRef<BrainSceneHandle, BrainSceneProps>(function BrainS
 
         {/* Live concept layer: the actual graph, capable of growing in via appendNodes(). */}
         <NeuronField
-          points={state.buffers.positions.subarray(0, state.buffers.count * 3)}
-          activations={state.buffers.activations.subarray(0, state.buffers.count)}
-          spawnTimes={state.buffers.spawnTimes.subarray(0, state.buffers.count)}
+          points={graphNeuronBuffers.points}
+          activations={graphNeuronBuffers.activations}
+          spawnTimes={graphNeuronBuffers.spawnTimes}
           maxCount={state.buffers.capacity}
           baseSize={7}
         />
