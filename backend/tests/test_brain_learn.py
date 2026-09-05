@@ -80,3 +80,53 @@ async def test_learn_concept_fetches_extracts_and_applies(monkeypatch):
     assert out["sources"] == ["https://en.wikipedia.org/wiki/Neuron"]
     fetch_mock.assert_awaited_once_with("https://en.wikipedia.org/wiki/Neuron", client)
     apply_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_learn_concept_anchors_queried_term(monkeypatch):
+    """The generic subject/object extractor learns the article's contents
+    (e.g. "ledger", "transaction") but never anchors the queried term itself
+    ("blockchain") into the graph. learn_concept must add an explicit anchor
+    node + edges so the queried term is answerable after learning."""
+    client = MagicMock()
+    resp = MagicMock()
+    resp.json = MagicMock(return_value=["blockchain", ["Blockchain"], [""], ["url"]])
+    resp.raise_for_status = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+
+    fetch_mock = AsyncMock(
+        return_value=(
+            "Ledger records transaction. Transaction updates block. Block forms chain.",
+            [],
+        )
+    )
+    monkeypatch.setattr(brain_learn, "fetch_wikipedia", fetch_mock)
+
+    def fake_extract(sentence):
+        if sentence.startswith("Ledger"):
+            return [("ledger", "transaction")]
+        if sentence.startswith("Transaction"):
+            return [("transaction", "block")]
+        if sentence.startswith("Block"):
+            return [("block", "chain")]
+        return []
+    monkeypatch.setattr(brain_learn, "extract_dependencies", fake_extract)
+
+    captured = {}
+
+    async def fake_apply_to_graph(session, word_freq, edge_counts):
+        captured["word_freq"] = Counter(word_freq)
+        captured["edge_counts"] = Counter(edge_counts)
+        return {"new_concepts": len(word_freq), "new_edges": len(edge_counts)}
+    monkeypatch.setattr(brain_learn, "apply_to_graph", fake_apply_to_graph)
+
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=MagicMock())
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+    neo4j_driver = MagicMock()
+    neo4j_driver.session = MagicMock(return_value=session_cm)
+
+    await brain_learn.learn_concept("blockchain", client, neo4j_driver, follow_links=0)
+
+    assert "blockchain" in captured["word_freq"]
+    assert any(cause == "blockchain" for (cause, _effect) in captured["edge_counts"])

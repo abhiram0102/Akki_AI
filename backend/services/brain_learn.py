@@ -67,6 +67,16 @@ async def learn_concept(term: str, client, neo4j_driver, follow_links: int = 1) 
         sources.append(link_url)
         _accumulate(link_text, word_freq, edge_counts)
 
+    anchor = term.strip().lower()
+    if anchor and len(anchor) >= 3 and word_freq:
+        # Topical anchor: an encyclopedia article about X evidences that X is
+        # associated with the concepts it most prominently discusses. Guarantees
+        # the queried term is itself a node and is answerable after learning.
+        word_freq[anchor] += 1  # ensure the anchor node exists
+        top = [w for w, _ in word_freq.most_common(25) if w != anchor][:20]
+        for w in top:
+            edge_counts[(anchor, w)] += word_freq[w]  # weight by article salience
+
     async with neo4j_driver.session() as session:
         result = await apply_to_graph(session, word_freq, edge_counts)
 
