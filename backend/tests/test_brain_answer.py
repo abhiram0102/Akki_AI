@@ -18,17 +18,21 @@ def _stack(patches):
             stack.enter_context(p)
         yield
 
-from backend.services import brain_answer, brain_query, brain_service
+from backend.services import brain_answer, brain_meaning, brain_query, brain_service
 
 
 def _graph(depends=None, produces=None, derived=None, convergences=None,
-           multi=None):
+           multi=None, sense=None, vocabulary=None):
     """Patch every graph read brain_answer performs.
 
     `convergences` feeds the two-concept path; `multi` feeds the single-topic
     path, where the topic's own branches are used as independent origins.
     """
     return (
+        # Sense lookup is stubbed by default so these tests never open a real
+        # meaning store; the sense-specific tests below supply their own.
+        patch.object(brain_meaning, "disambiguate", lambda c, q: sense),
+        patch.object(brain_meaning, "sense_vocabulary", lambda c, i: vocabulary or set()),
         patch.object(brain_service, "discover_convergence",
                      AsyncMock(return_value={"convergencePoints": multi or []})),
         patch.object(brain_service, "_top_dependencies", AsyncMock(return_value=depends or [])),
@@ -260,3 +264,70 @@ async def test_no_dangling_pronoun_when_the_first_clause_is_missing():
     plan = brain_query.QueryPlan(brain_query.DEFINE, ["dark matter"], "dark matter")
     out = await _build(plan, produces=[{"word": "galaxy", "g2": 3.0, "count": 1}])
     assert out["summary"].startswith("Dark matter drives")
+
+
+# ── The chosen sense has to change the answer, not just label it ─────────────
+
+_SENSE = {"sense": 1, "label": ["passion", "conviction"], "contextCount": 6,
+          "example": "He argued with such fire that the audience applauded."}
+
+
+@pytest.mark.asyncio
+async def test_evidence_is_narrowed_to_the_sense_being_asked_about():
+    """The graph is single-sense: every use of a word collapses onto one node,
+    so a concept's neighbours mix its meanings. Asking about the emotional
+    sense of a word must not come back talking about oxygen and fuel."""
+    plan = brain_query.QueryPlan(brain_query.DEFINE, ["fire"], "his fire and passion")
+    out = await _build(
+        plan,
+        depends=[{"word": "oxygen", "g2": 9.0, "count": 8},
+                 {"word": "conviction", "g2": 8.0, "count": 6}],
+        produces=[{"word": "fuel", "g2": 9.0, "count": 8},
+                  {"word": "passion", "g2": 8.0, "count": 6}],
+        sense=_SENSE,
+        vocabulary={"passion", "conviction", "argued", "audience"},
+    )
+    assert out["senseFiltered"] is True
+    assert [i["word"] for i in out["dependsOn"]] == ["conviction"]
+    assert [i["word"] for i in out["produces"]] == ["passion"]
+    assert "oxygen" not in out["summary"] and "fuel" not in out["summary"]
+
+
+@pytest.mark.asyncio
+async def test_narrowing_never_empties_an_answer():
+    """A sense whose vocabulary happens not to overlap the graph's neighbours
+    is a reason to be less sure which meaning applies, not a reason to report
+    knowing nothing about a concept the brain has genuinely read."""
+    plan = brain_query.QueryPlan(brain_query.DEFINE, ["fire"], "his fire")
+    out = await _build(
+        plan,
+        depends=[{"word": "oxygen", "g2": 9.0, "count": 8}],
+        produces=[{"word": "fuel", "g2": 9.0, "count": 8}],
+        sense=_SENSE,
+        vocabulary={"nothing", "in", "common"},
+    )
+    assert out["senseFiltered"] is False
+    assert [i["word"] for i in out["dependsOn"]] == ["oxygen"]
+
+
+@pytest.mark.asyncio
+async def test_an_unambiguous_concept_is_not_narrowed_at_all():
+    plan = brain_query.QueryPlan(brain_query.DEFINE, ["x"], "x")
+    out = await _build(plan, depends=[{"word": "a", "g2": 9.0, "count": 8}])
+    assert out["sense"] is None
+    assert out["senseFiltered"] is False
+    assert [i["word"] for i in out["dependsOn"]] == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_the_answer_says_which_meaning_it_settled_on():
+    """A confident answer about the wrong sense of a word is the most
+    misleading thing here, so the choice has to be stated, not implied."""
+    plan = brain_query.QueryPlan(brain_query.DEFINE, ["fire"], "his fire and passion")
+    out = await _build(
+        plan,
+        produces=[{"word": "passion", "g2": 8.0, "count": 6}],
+        sense=_SENSE,
+        vocabulary={"passion"},
+    )
+    assert "passion" in out["observation"]

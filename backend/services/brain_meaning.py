@@ -52,10 +52,18 @@ MIN_CONTEXTS_FOR_SENSES = 6
 # this is rare, and every extra candidate costs a clustering pass.
 MAX_SENSES = 4
 
-# A split is only accepted when it tightens the contexts by at least this much
-# relative to leaving them together. Without a floor, k-means will always
-# "find" clusters in noise.
-MIN_SPLIT_IMPROVEMENT = 0.12
+# How far beyond chance a split has to be before it counts as real meaning,
+# measured in standard deviations against shuffled labels (see `_best_k`).
+#
+# Calibrated on data, not guessed. One concept used a single way scores up to
+# about 2.5 here — a real split of one meaning's contexts still looks a little
+# better than random. The same concept used two genuinely different ways scores
+# near 5. A floor of 3.5 sits in the gap, so an unambiguous word is left whole.
+MIN_SENSE_Z = 3.5
+
+# How many shuffles form the null distribution. Enough for a stable estimate at
+# the scale of one concept's contexts, cheap enough to run per query.
+_NULL_SHUFFLES = 200
 
 # Words this common carry no sense information; they are dropped from labels.
 # Derived from the contexts themselves rather than a stopword list: a word that
@@ -134,16 +142,43 @@ def _contexts(concept: str) -> tuple[list[str], list]:
     return documents, embeddings
 
 
+def _unit(vectors):
+    """Scale every embedding to unit length before clustering.
+
+    Sentence embeddings carry their meaning in DIRECTION, not magnitude, which
+    is why the store itself is configured for cosine distance. Clustering the
+    raw vectors with Euclidean distance therefore measures partly the wrong
+    thing: two sentences that mean the same thing but differ in length sit far
+    apart, and the split lands in the wrong place. Normalising first makes
+    Euclidean distance agree with cosine, so k-means becomes the spherical
+    k-means that text embeddings actually call for.
+    """
+    import numpy as np
+
+    lengths = np.linalg.norm(vectors, axis=1, keepdims=True)
+    lengths[lengths == 0] = 1.0
+    return vectors / lengths
+
+
 def _kmeans(vectors, k: int, iterations: int = 25):
     """k-means with deterministic seeding, so the same store yields the same
     senses every time rather than shifting between calls."""
     import numpy as np
 
     count = len(vectors)
-    # Seed with the points furthest apart rather than at random: a random start
-    # makes the discovered senses depend on luck, and two runs over identical
-    # data would disagree about what a word means.
-    centres = [vectors[0]]
+    # Seeding is deterministic so that two runs over identical data always
+    # agree about what a word means; a random start would make the discovered
+    # senses depend on luck.
+    #
+    # The first centre is the context furthest from the average of them all,
+    # not simply the first one stored. Taking the first stored context anchors
+    # the whole clustering on an arbitrary sentence, and with sense-sized data
+    # that is enough to hand back a lopsided split — two real meanings came
+    # back as nine contexts against three. Starting from the most extreme
+    # context, then repeatedly taking whatever is furthest from everything
+    # chosen so far, puts the initial centres in genuinely different regions.
+    mean = vectors.mean(axis=0)
+    centres = [vectors[int(np.argmax(np.linalg.norm(vectors - mean, axis=1)))]]
     for _ in range(1, k):
         distances = np.min(
             np.stack([np.linalg.norm(vectors - c, axis=1) for c in centres]), axis=0
@@ -165,43 +200,75 @@ def _kmeans(vectors, k: int, iterations: int = 25):
     return labels, centres
 
 
-def _spread(vectors, labels, centres) -> float:
+def _spread(vectors, labels, k: int) -> float:
     """Mean distance from each context to the centre of its own group. Lower
     means the groups genuinely hold together."""
     import numpy as np
 
-    return float(
-        np.mean([np.linalg.norm(v - centres[labels[i]]) for i, v in enumerate(vectors)])
-    )
+    total = 0.0
+    for cluster in range(k):
+        members = vectors[labels == cluster]
+        if len(members):
+            total += float(np.linalg.norm(members - members.mean(axis=0), axis=1).sum())
+    return total / len(vectors)
+
+
+def _separation_z(vectors, labels, k: int) -> float:
+    """How much better this split is than the same split made at random.
+
+    The question "is this really two meanings, or one meaning cut in half?"
+    cannot be answered by how tight the groups are, because cutting ANY set of
+    points in two makes them tighter — that is arithmetic. Nor by silhouette,
+    which on real sense-sized data scores a single meaning about as highly as
+    two genuine ones (measured, not assumed).
+
+    It can be answered by asking whether the grouping beats chance. The same
+    group sizes are assigned at random many times to build a null distribution,
+    and the real split is scored in standard deviations below that null. A
+    split that reflects genuine meaning sits far outside it; a split of one
+    meaning sits close to it.
+
+    This is the same kind of test the graph already applies to edges, where a
+    co-occurrence has to beat chance before it counts as a dependency.
+    """
+    import numpy as np
+
+    real = _spread(vectors, labels, k)
+    # Fixed seed: the same contexts must always yield the same senses, or the
+    # brain would disagree with itself about what a word means between calls.
+    rng = np.random.default_rng(0)
+    shuffled = labels.copy()
+    null = np.empty(_NULL_SHUFFLES)
+    for index in range(_NULL_SHUFFLES):
+        rng.shuffle(shuffled)
+        null[index] = _spread(vectors, shuffled, k)
+    deviation = float(null.std())
+    if deviation == 0:
+        return 0.0
+    return (float(null.mean()) - real) / deviation
 
 
 def _best_k(vectors) -> int:
     """How many senses this concept's contexts actually support.
 
-    Tries each candidate split and keeps the largest one that tightens the
-    contexts by a real margin over not splitting at all. A concept used a
-    single way never clears the margin and stays at one sense, which is the
-    answer that matters most: inventing senses for an unambiguous word would
-    fragment the graph for nothing.
+    Takes the SMALLEST number of groups that separates the contexts beyond
+    chance. Smallest rather than best-scoring: two real meanings and three
+    fragments of them score almost identically, and reporting three would
+    shred a real sense for no gain.
+
+    Returns 1 when no split beats chance, which is the answer that matters
+    most — inventing senses for an unambiguous word would split its evidence
+    in half and make every answer about it weaker.
     """
-    import numpy as np
-
-    baseline = _spread(vectors, np.zeros(len(vectors), dtype=int),
-                       np.stack([vectors.mean(axis=0)]))
-    if baseline == 0:
-        return 1
-
-    best = 1
     for k in range(2, min(MAX_SENSES, len(vectors)) + 1):
-        labels, centres = _kmeans(vectors, k)
-        # A split that leaves a group with a single context is describing an
-        # outlier, not a sense.
+        labels, _ = _kmeans(vectors, k)
+        # A group holding a single context is describing an outlier, not a
+        # sense, and its spread is trivially zero.
         if min(int((labels == i).sum()) for i in range(k)) < 2:
-            continue
-        improvement = (baseline - _spread(vectors, labels, centres)) / baseline
-        if improvement >= MIN_SPLIT_IMPROVEMENT:
-            best = k
-    return best
+            break
+        if _separation_z(vectors, labels, k) >= MIN_SENSE_Z:
+            return k
+    return 1
 
 
 def _label(own: list[str], other: list[str]) -> list[str]:
@@ -251,7 +318,7 @@ def senses(concept: str) -> list[dict]:
                 "contextCount": len(documents), "example": documents[0],
             }]
 
-        vectors = np.array(embeddings, dtype=float)
+        vectors = _unit(np.array(embeddings, dtype=float))
         k = _best_k(vectors)
         if k == 1:
             return [{
@@ -275,6 +342,46 @@ def senses(concept: str) -> list[dict]:
     except Exception as exc:
         logger.warning("Could not compute senses for %r: %s", concept, exc)
         return []
+
+
+def sense_vocabulary(concept: str, sense_index: int) -> set[str]:
+    """The words that appear alongside a concept in ONE of its senses.
+
+    This is what lets an answer be about the right meaning. The graph itself is
+    single-sense — every use of a word collapses onto one node, so a concept's
+    stored neighbours mix its meanings together. Intersecting those neighbours
+    with the vocabulary of the sense actually being asked about separates them
+    again, at answer time, without the graph having to change.
+
+    Returns an empty set when the concept has fewer than two senses, since
+    there is then nothing to separate.
+    """
+    concept = (concept or "").strip().lower()
+    if not concept:
+        return set()
+    try:
+        import numpy as np
+
+        found = senses(concept)
+        if len(found) < 2:
+            return set()
+        documents, embeddings = _contexts(concept)
+        if not documents or len(embeddings) == 0:
+            return set()
+
+        labels, _ = _kmeans(_unit(np.array(embeddings, dtype=float)), len(found))
+        words: set[str] = set()
+        for document, label in zip(documents, labels):
+            if int(label) != sense_index:
+                continue
+            for token in document.split():
+                cleaned = token.lower().strip(".,;:()[]'\"")
+                if len(cleaned) > 2:
+                    words.add(cleaned)
+        return words
+    except Exception as exc:
+        logger.warning("Could not read sense vocabulary for %r: %s", concept, exc)
+        return set()
 
 
 def disambiguate(concept: str, query: str) -> dict | None:
@@ -315,7 +422,7 @@ def disambiguate(concept: str, query: str) -> dict | None:
             return None
         import numpy as np
 
-        labels, _ = _kmeans(np.array(embeddings, dtype=float), len(found))
+        labels, _ = _kmeans(_unit(np.array(embeddings, dtype=float)), len(found))
         membership = {doc: int(label) for doc, label in zip(documents, labels)}
         for document in matched:
             sense_index = membership.get(document)

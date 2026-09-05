@@ -126,3 +126,32 @@ def test_empty_input_is_handled(store):
     assert brain_meaning.record_contexts("", ["some sentence here"]) == 0
     assert brain_meaning.senses("") == []
     assert brain_meaning.disambiguate("fire", "") is None
+
+
+def test_sense_vocabulary_separates_the_two_meanings(store):
+    """What makes sense detection useful rather than decorative: the words that
+    surround one meaning must not be the words that surround the other."""
+    brain_meaning.record_contexts("fire", _PHYSICAL + _EMOTIONAL)
+    found = brain_meaning.senses("fire")
+    assert len(found) >= 2
+    first = brain_meaning.sense_vocabulary("fire", found[0]["sense"])
+    second = brain_meaning.sense_vocabulary("fire", found[1]["sense"])
+    assert first and second
+    # "oxygen" and "passion" belong to different meanings of the same word.
+    assert ("oxygen" in first) != ("oxygen" in second)
+    assert ("passion" in first) != ("passion" in second)
+
+
+def test_sense_vocabulary_is_empty_for_an_unambiguous_concept(store):
+    """With one sense there is nothing to separate, and an empty result tells
+    the caller not to narrow anything."""
+    brain_meaning.record_contexts("fire", _PHYSICAL)
+    assert brain_meaning.sense_vocabulary("fire", 0) == set()
+
+
+def test_two_meanings_are_not_shredded_into_more_than_two(store):
+    """Splitting further always tightens the groups a little, which is
+    arithmetic rather than meaning. Two genuinely distinct uses must come back
+    as two senses, not as four fragments of two."""
+    brain_meaning.record_contexts("fire", _PHYSICAL + _EMOTIONAL)
+    assert len(brain_meaning.senses("fire")) == 2

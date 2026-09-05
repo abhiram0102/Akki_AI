@@ -241,6 +241,46 @@ async def build(plan, min_count: int = brain_service.MIN_EDGE_COUNT,
         except Exception:
             sense = None
 
+    # Detecting the sense is only half the job. The graph is single-sense —
+    # every use of a word collapses onto one node — so a concept's stored
+    # neighbours mix its meanings together, and an answer about emotional fire
+    # would still come back talking about oxygen and fuel. Intersecting those
+    # neighbours with the vocabulary of the sense actually being asked about
+    # separates them again.
+    #
+    # DESIGN NOTE — why this happens here and not in the graph.
+    # The alternative was to tag every edge with the sense it came from and
+    # partition the graph itself. That was rejected: cluster identity is not
+    # stable as contexts accumulate, so an edge written today as sense 1 could
+    # denote a different sense once more reading shifts the clusters, and there
+    # is no migration for edges already written. Filtering at answer time reads
+    # the current clustering every time, so it is always consistent with what
+    # the brain currently believes, and needs no schema change or migration.
+    sense_filtered = False
+    if sense is not None:
+        try:
+            vocabulary = await run_in_threadpool(
+                brain_meaning.sense_vocabulary, primary, sense["sense"]
+            )
+        except Exception:
+            vocabulary = set()
+        if vocabulary:
+            def in_sense(items, key):
+                return [i for i in items if (i.get(key) or "").split()[-1] in vocabulary]
+
+            narrowed = {
+                "dependsOn": in_sense(sections["dependsOn"], "word"),
+                "produces": in_sense(sections["produces"], "word"),
+                "derived": in_sense(sections["derived"], "concept"),
+            }
+            # Never let narrowing empty the answer. A sense whose vocabulary
+            # happens not to overlap the graph's neighbours is a reason to say
+            # less confidently which meaning applies, not a reason to report
+            # knowing nothing about a concept the brain has genuinely read.
+            if narrowed["dependsOn"] or narrowed["produces"]:
+                sections.update(narrowed)
+                sense_filtered = True
+
     evidence = sections["dependsOn"] + sections["produces"]
     confidence = _confidence(evidence)
 
@@ -288,5 +328,9 @@ async def build(plan, min_count: int = brain_service.MIN_EDGE_COUNT,
         "gap": _gap(sections, plan, confidence),
         "confidence": confidence,
         "sense": sense,
+        # Whether the evidence above was narrowed to the chosen sense, so a
+        # reader can tell a sense-specific answer from one that merely knows
+        # which sense was meant.
+        "senseFiltered": sense_filtered,
         "provenance": sources or [],
     }

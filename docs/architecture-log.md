@@ -4,6 +4,76 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-05 (session 5) — Senses now change the answer, not just label it
+
+**Status:** implemented and tested. 193 backend tests pass.
+
+### The gap this closes
+
+Sense detection landed last session but was decorative: the answer could say
+which meaning of a word was intended and then draw its evidence from the
+single-sense graph anyway. Asking about the emotional sense of "fire" still
+came back talking about oxygen and fuel.
+
+`brain_meaning.sense_vocabulary` returns the words surrounding one sense, and
+`brain_answer` intersects the graph's neighbours with it. Narrowing never
+empties an answer: a sense whose vocabulary does not overlap the graph is a
+reason to be less certain which meaning applies, not a reason to claim
+ignorance of a concept the brain has read. `answer.senseFiltered` says whether
+it happened.
+
+### Rejected: partitioning the graph by sense
+
+The obvious alternative was tagging every edge with the sense it came from.
+Rejected because cluster identity is not stable as contexts accumulate — an
+edge written today as sense 1 can denote a different sense once more reading
+shifts the clusters — and there is no migration for edges already written.
+Filtering at answer time reads the current clustering every time, so it always
+agrees with what the brain currently believes, and needs no schema change.
+
+### Three real defects found and fixed in the clustering
+
+Found by measuring rather than assuming, and each one was silently wrong:
+
+1. **Over-splitting.** The old rule took the largest split clearing a floor.
+   Splitting further always tightens groups a little — arithmetic, not meaning
+   — so every concept was driven to the maximum and one real sense came back
+   as several fragments.
+2. **Arbitrary seeding.** The first centre was simply the first stored context,
+   which anchors the whole clustering on an arbitrary sentence. Two real
+   meanings split nine-against-three. The first centre is now the context
+   furthest from the average.
+3. **The selection criterion could not discriminate at all.** Measured: mean
+   spread improvement scored one meaning (0.12) *higher* than two genuine ones
+   (0.11). Silhouette was no better, scoring a single meaning 0.126 against
+   0.125 for two. Both would have accepted or rejected the wrong thing.
+
+### What replaced it: a test against chance
+
+The question "two meanings, or one meaning cut in half?" is answered by asking
+whether the grouping beats chance. The same group sizes are assigned at random
+many times to build a null distribution, and the real split is scored in
+standard deviations below it. Measured: one meaning scores up to about 2.5, two
+genuine meanings score near 5. The floor sits at 3.5, in the gap.
+
+This is the same kind of test the graph already applies to edges, where a
+co-occurrence must beat chance before it counts as a dependency. The threshold
+is calibrated against measurements recorded above, not guessed, and the null is
+drawn with a fixed seed so the brain never disagrees with itself about what a
+word means between calls.
+
+The smallest k that clears the floor wins, not the best-scoring one: two real
+meanings and three fragments of them score almost identically, and reporting
+three would shred a real sense for nothing.
+
+### Open questions
+
+1. The clustering signal is genuinely weak at small context counts. A concept
+   needs a fair amount of reading before senses separate reliably. This is a
+   property of the data, not a bug, but it means senses appear late.
+2. Curiosity still has no feedback signal.
+3. `answer.senseFiltered` is not yet rendered by the frontend.
+
 ## 2026-09-05 (session 4) — Source discovery replaces every hardcoded parser; meaning layer added
 
 **Status:** implemented and tested. 186 backend tests pass.
