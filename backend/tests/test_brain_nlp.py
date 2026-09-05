@@ -69,3 +69,24 @@ def test_content_words_still_extracted_after_filter():
     # Sanity: the filter must not reject legitimate noun concepts.
     result = extract_dependencies("Deforestation causes erosion.")
     assert ("deforestation", "erosion") in result
+
+
+def test_multiword_concept_kept_as_one_phrase():
+    # "machine learning" must be a single concept, not "machine" + "learning".
+    result = extract_dependencies("Machine learning enables automation.")
+    causes = [c for c, _ in result]
+    assert "machine learning" in causes
+    # And it should NOT have fragmented into the bare head noun.
+    assert "learning" not in causes
+
+
+def test_multiword_security_term_captured():
+    # A real security term stays intact as the cause concept.
+    result = extract_dependencies("SQL injection causes data breaches.")
+    assert any(c == "sql injection" for c, _ in result)
+
+
+def test_single_word_concepts_unchanged_by_phrase_logic():
+    # Existing single-token behaviour must be preserved.
+    assert ("fire", "heat") in extract_dependencies("Fire causes heat.")
+    assert ("fuel", "engine") in extract_dependencies("The engine requires fuel.")
