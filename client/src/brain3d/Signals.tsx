@@ -213,6 +213,18 @@ export default function Signals({ edges, activePath, speed = 0.35, reducedMotion
       mesh.frustumCulled = false;
       mesh.count = 0;
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      // The previous mesh's instanceMatrix/instanceColor buffers were
+      // already uploaded to the GPU (it was drawn at least once before this
+      // capacity outgrew it) — swapping which mesh renders does NOT free
+      // that GPU memory on its own. Three.js auto-registers a 'dispose'
+      // event listener on every InstancedMesh the first time it renders
+      // (see three's WebGLObjects.js: onInstancedMeshDispose), which frees
+      // exactly these two buffers — dispatching that event is the correct,
+      // public way to trigger it. Left unfixed, a long session with the
+      // graph growing repeatedly (learn-on-demand's whole point) accumulates
+      // one orphaned buffer per capacity step, which contributed to a real
+      // "Context Lost" GPU crash.
+      if (prev) prev.mesh.dispatchEvent({ type: "dispose" });
       ambientMeshRef.current = { mesh, capacity };
     }
     return ambientMeshRef.current!.mesh;

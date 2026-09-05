@@ -73,6 +73,22 @@ export function useBrainSurfaceGeometry(): THREE.BufferGeometry | null {
     const geometry = mesh.geometry.clone();
     geometry.applyMatrix4(mesh.matrixWorld);
     geometry.scale(MODEL_SCALE, MODEL_SCALE, MODEL_SCALE);
+
+    // We only ever need this mesh's geometry -- we render it with our own
+    // fresnel shader (below), never the model's own material. The original
+    // material carries 3 real textures (base color/normal/roughness) that
+    // otherwise sit around for the app's whole lifetime (drei's useGLTF
+    // cache never expires) for no benefit. Free them immediately.
+    const originalMaterial = mesh.material as THREE.MeshStandardMaterial | THREE.MeshStandardMaterial[];
+    const materials = Array.isArray(originalMaterial) ? originalMaterial : [originalMaterial];
+    for (const mat of materials) {
+      mat.map?.dispose();
+      mat.normalMap?.dispose();
+      mat.metalnessMap?.dispose();
+      mat.roughnessMap?.dispose();
+      mat.dispose();
+    }
+
     return geometry;
   }, [gltf]);
 }

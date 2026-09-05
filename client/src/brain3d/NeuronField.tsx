@@ -59,14 +59,32 @@ export default function NeuronField({
   // Buffers are keyed on `capacity` so growth headroom changes reallocate,
   // but ordinary position/activation/spawnTime updates (same capacity) reuse
   // the same typed arrays and are pushed via the effect below.
+  //
+  // The previous generation's attributes (already GPU-uploaded, since they
+  // were drawn at least once before capacity outgrew them) would otherwise
+  // never get freed — BufferAttribute has no .dispose(), and simply
+  // creating new ones and letting React swap which object is attached does
+  // NOT free that VRAM on its own. `geometryRef.current.dispose()`, called
+  // here while the OLD attributes are still attached (before the new ones
+  // below replace them), is what actually frees them: three.js's
+  // WebGLGeometries listens for the geometry's own 'dispose' event and
+  // removes every currently-attached attribute's GPU buffer, then
+  // transparently re-registers for the next dispose cycle the next time
+  // this same geometry object renders with its new attributes attached.
+  // Left unfixed, repeated graph growth (learn-on-demand's whole point)
+  // accumulates orphaned buffers indefinitely, which contributed to a real
+  // "Context Lost" GPU crash during a live session.
   const { positionAttr, spawnAttr, sizeAttr, activationAttr } = useMemo(() => {
+    // No-op on the very first render (geometryRef.current is still null —
+    // refs attach during commit, which hasn't happened yet).
+    geometryRef.current?.dispose();
     return {
       positionAttr: new THREE.BufferAttribute(new Float32Array(Math.max(capacity, 1) * 3), 3),
       spawnAttr: new THREE.BufferAttribute(new Float32Array(Math.max(capacity, 1)), 1),
       sizeAttr: new THREE.BufferAttribute(new Float32Array(Math.max(capacity, 1)), 1),
       activationAttr: new THREE.BufferAttribute(new Float32Array(Math.max(capacity, 1)), 1),
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capacity]);
 
   useEffect(() => {

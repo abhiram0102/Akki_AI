@@ -107,7 +107,12 @@ export interface BrainSceneProps {
 // `uTime - spawnTime` is always well past the ~0.8s grow-in window).
 const ALREADY_SPAWNED = -1e6;
 
-const DEFAULT_AMBIENT_COUNT = 20000;
+// Was 20000 -- combined with the real ~24K-vertex anatomical mesh, the
+// concept graph's own points, glowing pipe geometry, and two post-processing
+// passes, this scene got heavy enough to trigger real GPU resets ("THREE.
+// WebGLRenderer: Context Lost", confirmed via browser console) while
+// orbiting the camera. Cut as one of several load-reduction measures.
+const DEFAULT_AMBIENT_COUNT = 7000;
 
 interface GrowableBuffers {
   positions: Float32Array;
@@ -347,7 +352,12 @@ const BrainScene = forwardRef<BrainSceneHandle, BrainSceneProps>(function BrainS
   return (
     <div className={className} style={{ width: "100%", height: "100%" }}>
       <Canvas
-        dpr={[1, 2]}
+        // Was [1, 2] (up to native/HiDPI pixel density); fixed at 1 as part
+        // of the same GPU-load reduction that fixed the "Context Lost"
+        // crash -- Bloom + ChromaticAberration are full-screen passes whose
+        // cost scales with pixel count, so 2x density roughly quadruples
+        // their work for marginal sharpness gain on this kind of scene.
+        dpr={1}
         // NOTE: was "demand" per the original spec, but this scene's entire
         // visual language is continuous shader-driven animation (neuron
         // spawn-in easing, signal pulses, auto-rotate) -- none of that reads
@@ -404,7 +414,10 @@ const BrainScene = forwardRef<BrainSceneHandle, BrainSceneProps>(function BrainS
             Scene is small enough that a fixed dpr is fine without it. */}
 
         <EffectComposer multisampling={0}>
-          <Bloom mipmapBlur luminanceThreshold={0.15} luminanceSmoothing={0.3} intensity={1.1} />
+          {/* mipmapBlur removed: generates a full mip chain every frame,
+              notably more expensive than the default blur -- part of the
+              same GPU-load reduction pass. */}
+          <Bloom luminanceThreshold={0.15} luminanceSmoothing={0.3} intensity={1.1} />
           <ChromaticAberration offset={chromaticOffset} radialModulation={false} modulationOffset={0} />
         </EffectComposer>
       </Canvas>
