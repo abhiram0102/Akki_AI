@@ -11,6 +11,14 @@ dependencies = [
     "fastapi>=0.136.1",
     "google-genai>=2.0.0",
     "google-generativeai>=0.8.6",
+    # Imported across the backend (crawler, main, several services) but never
+    # declared, same class of gap as the sse-starlette one: a clean install
+    # imports fine and then fails at request time. The spaCy MODEL itself is a
+    # separate artifact and is already provisioned by both Dockerfiles via
+    # `python -m spacy download en_core_web_sm`, so only the library is listed.
+    "httpx>=0.28.1",
+    "neo4j>=6.3.0",
+    "spacy>=3.8.16",
     "limits>=5.8.0",
     "passlib[bcrypt]>=1.7.4",
     "psycopg2-binary>=2.9.12",
@@ -22,6 +30,10 @@ dependencies = [
     "secure>=2.0.1",
     "slowapi>=0.1.9",
     "sqlalchemy>=2.0.49",
+    # Imported by the /api/brain/ask SSE handler in backend/main.py but never
+    # declared, so a clean install could import the app and then fail at
+    # request time. Its three endpoint tests were erroring on collection.
+    "sse-starlette>=2.1.0",
     "uvicorn[standard]>=0.46.0",
 ]
 

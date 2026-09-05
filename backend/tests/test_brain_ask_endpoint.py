@@ -44,6 +44,17 @@ class TestBrainAskKnownConcept:
                 {"word": "ash", "g2": 20.0, "count": 5},
             ]
             with patch(
+                # Single-topic convergence uses the topic's own branches as
+                # origins; unmocked it reaches a real Neo4j.
+                "backend.services.brain_service.discover_convergence",
+                AsyncMock(return_value={"convergencePoints": []}),
+            ), patch(
+                # In-edges are read by the answer composer (Function 7's
+                # "what this concept depends on"); unmocked it reaches a real
+                # Neo4j and the test fails on auth rather than on behaviour.
+                "backend.services.brain_service._top_dependencies",
+                AsyncMock(return_value=[]),
+            ), patch(
                 "backend.services.brain_service._top_associations",
                 AsyncMock(return_value=assoc),
             ), patch(
@@ -76,6 +87,17 @@ class TestBrainAskUnknownConcept:
         _override_auth()
         try:
             with patch(
+                # Single-topic convergence uses the topic's own branches as
+                # origins; unmocked it reaches a real Neo4j.
+                "backend.services.brain_service.discover_convergence",
+                AsyncMock(return_value={"convergencePoints": []}),
+            ), patch(
+                # In-edges are read by the answer composer (Function 7's
+                # "what this concept depends on"); unmocked it reaches a real
+                # Neo4j and the test fails on auth rather than on behaviour.
+                "backend.services.brain_service._top_dependencies",
+                AsyncMock(return_value=[]),
+            ), patch(
                 "backend.services.brain_service._top_associations",
                 AsyncMock(side_effect=[[], [{"word": "gravity", "g2": 12.0, "count": 4}]]),
             ), patch(
@@ -118,6 +140,17 @@ class TestBrainAskLearnFailure:
         _override_auth()
         try:
             with patch(
+                # Single-topic convergence uses the topic's own branches as
+                # origins; unmocked it reaches a real Neo4j.
+                "backend.services.brain_service.discover_convergence",
+                AsyncMock(return_value={"convergencePoints": []}),
+            ), patch(
+                # In-edges are read by the answer composer (Function 7's
+                # "what this concept depends on"); unmocked it reaches a real
+                # Neo4j and the test fails on auth rather than on behaviour.
+                "backend.services.brain_service._top_dependencies",
+                AsyncMock(return_value=[]),
+            ), patch(
                 "backend.services.brain_service._top_associations",
                 AsyncMock(return_value=[]),
             ), patch(

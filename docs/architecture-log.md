@@ -1,0 +1,288 @@
+# AKKI Brain — Architecture Log
+
+Running log so a new session resumes without re-deriving context. Newest entry first.
+
+---
+
+## 2026-09-05 (session 3) — Built: curiosity loop + single-topic convergence
+
+**Status:** implemented and tested. 153 backend tests pass.
+
+### Function 8 — the loop now closes
+
+AKKI_FULL_ARCHITECTURE.md describes the cycle as
+`Question -> Answer -> Gap -> Read -> Better Answer -> Better Gap Detection`.
+Every arrow but the third existed. `/ask` detected gaps and dropped them, so
+the brain could say "my picture of this is thin" and never act on it.
+
+**`backend/services/brain_curiosity.py`** (new) turns what an answer was least
+able to stand behind into entries on the crawl frontier the background crawler
+already drains. Ranked by weakness:
+
+1. The concept asked about, when the graph had nothing solid on it.
+2. **Derived links** — the brain's own 2-hop inferences that no source stated.
+   Queueing these is what makes the loop self-correcting rather than
+   self-confirming: it goes and checks its own guesses.
+3. Concepts named in the answer resting on very few observations.
+
+Two properties held deliberately. Selection is pure and reads only the
+already-composed answer, and queueing runs *after* the response is streamed, so
+"zero live internet at answer time" still holds and the answer gains no
+latency. Only concepts the answer actually named can be queued, and the batch
+is capped so curiosity trickles — the crawler's own seeding comment records
+that a flood once drowned the knowledge sources.
+
+A new `curious` SSE stage reports what it decided to go read.
+
+### Function 7 step 5 now applies to every question
+
+Convergence previously ran only for questions naming two or more concepts, so
+the capability the architecture doc calls "the moment of intelligence" was
+unreachable from the commonest kind of query. For a single topic, its own
+strongest branches are used as the independent origins; a concept several of
+them reach is a hub nothing stated directly. Seeds come from edges already
+fetched, so it costs no extra neighbour lookup, and a seed or the topic itself
+turning up is filtered out as circular rather than reported as a finding.
+
+A real multi-origin convergence now outranks a 2-hop derived link for the
+volunteered remark, since being reached from several independent branches is
+stronger evidence than any single inferred path.
+
+### Bugs found and fixed
+
+- **"dark matter" was being looked up as "matter".** spaCy's noun chunker fails
+  on the predicate of a question — for "what is dark matter" the only chunk it
+  finds is "what" — so the writer's normalizer fell back to the bare head noun.
+  The article that taught the concept stored "dark matter", so this was a
+  guaranteed miss on a concept the brain genuinely knew. The parse still
+  carries the dropped information as an adjectival-modifier label, so the
+  phrase is rebuilt from dependency labels. This narrows the gap between the
+  query and writer normalizers rather than widening it.
+- **Dangling pronoun.** With no incoming edges the summary opened "It drives
+  galaxy", a pronoun with no antecedent. The topic is named instead.
+
+### Alternatives rejected
+
+- **Queueing concepts rather than URLs.** The frontier is URL-keyed and the
+  crawler consumes URLs, so this would have meant a schema change. Resolution
+  is injected into `queue_reading` instead, keeping the module free of any one
+  site's conventions even though the current caller passes a Wikipedia resolver.
+- **Deeper single-topic convergence.** The origins start out related to each
+  other, so a long walk finds trivial common ground. Depth is kept short.
+
+### Hardcoded assumptions (charter status)
+
+- **Flagged in-line, inherited not new:** `brain_curiosity.queue_reading`
+  builds a URL from a resolved title. That is a predefined URL convention, the
+  same one `brain_learn` already applies. The resolver is injected so this call
+  site changes when the fetch layer learns to discover sources by pattern.
+- Unchanged: `brain_query._WH_INTENT`, `brain_nlp` connective tables,
+  `brain_learn` Wikipedia hardcoding.
+
+### Open questions
+
+1. Nothing yet reads the `curious` stage on the frontend.
+2. Curiosity has no feedback signal — it does not learn whether reading a
+   queued concept actually improved later answers.
+3. Word-sense disambiguation still needs the vector layer. Single-sense.
+4. `client/src/brain3d/useAskStream.ts` contract doc is stale: `thinking`
+   carries `plan`, `answer` carries `answer`, and there is now a `curious`
+   stage. Owned by whoever holds that file.
+
+## 2026-09-05 (later) — Built: query understanding + answer formation
+
+**Status:** implemented and tested. 137 backend tests pass. Human approved the
+direction ("make it feel like Jarvis") and asked for the call to be made.
+
+### The decision that shaped it
+
+The user asked for something that feels like a real AI rather than a lookup
+tool. The tempting reading is "make it speak in fluent prose", which in practice
+means a language model writes the answer text. That was rejected, and not only
+because two documents forbid it. Fluent paragraphs are the cheapest and least
+distinctive part of the effect: any chatbot produces them, and routing the
+answer through a model would mean the model is doing the thinking while the
+graph becomes decoration.
+
+What actually reads as intelligence here is the part that is genuinely the
+brain's own: it learns live when it hits a gap, it derives links no source
+stated, it volunteers a connection nobody asked about, and it admits what it
+does not know. All of that is graph-native. So the answer speaks in confident
+first person, and every sentence is composed from edges that exist.
+
+A narrator model could later rephrase `summary` while being forbidden to add a
+fact. Nothing in `brain_answer` would need to change. That remains open.
+
+### Built
+
+- **`backend/services/brain_query.py`** (new). Parses a natural question into
+  `QueryPlan{intent, topics}` using the spaCy pipeline `brain_nlp` already
+  loads. No new dependency, no model call. Topics go through the graph
+  writer's own normalizer, so a term from a question is spelled exactly like
+  the node key stored when that concept was learned.
+- **`brain_service._top_dependencies`** (new). The reversed traversal. Edges
+  were always directed but only ever read outward, so "what X depends on" was
+  unreachable. One Cypher query with the arrow flipped.
+- **`backend/services/brain_answer.py`** (new). Composes Function 7 step 6:
+  `dependsOn`, `produces`, `convergences`, `derived`, plus a spoken `summary`,
+  an unprompted `observation`, an honest `gap`, `confidence`, and `provenance`.
+- **`/api/brain/ask`** now parses before querying, routes by intent, and
+  carries provenance that was previously computed and discarded.
+- **`BrainAskRequest.query`** added alongside `concept`. Both optional,
+  `query` wins. Posting a bare concept behaves exactly as before.
+
+### Direction is read from grammar, not vocabulary
+
+`brain_nlp` already knows which verbs run cause-to-effect and which run
+dependent-to-prerequisite, and uses that to orient every edge it writes. The
+same tables applied to the question say which way to travel, based on the
+dependency role the user's concept occupies:
+
+    "what causes inflation"       -> concept is the OBJECT   -> read in-edges
+    "what does inflation cause"   -> concept is the SUBJECT   -> read out-edges
+    "what does encryption require"-> BACKWARD verb, subject   -> read in-edges
+
+Identical vocabulary, opposite traversal. `test_causal_pair_disagree_on_direction`
+asserts exactly that, and it is the test a question-word map cannot pass.
+
+### Alternatives rejected
+
+- **Language model for intent parsing or answer text.** See above.
+- **Re-querying out-edges inside the composer.** The endpoint has already read
+  them to decide whether to learn. Re-reading wastes a round trip and can
+  return something different, which would leave the spoken answer disagreeing
+  with the evidence list printed beside it. Caller now hands them in.
+- **Changing `associations` / `inferred` in the SSE payload.** The 3D scene
+  consumes them and was under concurrent edit. Everything new is additive.
+
+### Bugs found and fixed while building
+
+- A rare word the parser does not tag as a noun produced no topic at all, so
+  the whole question stood in as the concept and the brain answered "I don't
+  know what is quasicrystal". Grammar words are now stripped and the remainder
+  used as the subject.
+- `gap` and `confidence` were computed from different thresholds, so an answer
+  could report strong confidence and "still thin" in the same breath.
+- Spoken sentences opened lowercase because concept names are stored lowercase.
+
+### Pre-existing defects found (fixed / flagged)
+
+- **Fixed:** `sse-starlette` is imported by the ask endpoint but was never
+  declared in `pyproject.toml`, so a clean install would import the app and
+  then fail at request time. Its three endpoint tests were erroring on
+  collection before this session began. Declared and installed.
+- **Flagged, not fixed:** `neo4j`, `spacy` and `httpx` are also imported and
+  installed but undeclared. The dependency list is systematically incomplete.
+- **Flagged:** the test suite needs `DATABASE_URL` set to import at all, and
+  there is no `conftest.py` providing one. Every backend test errors on
+  collection in a clean shell.
+
+### Hardcoded assumptions (charter status)
+
+- **New, flagged in-line:** `brain_query._WH_INTENT`, a two-entry table mapping
+  "why" and "how". Morphology cannot separate "why X" from "what X". It is the
+  only lexical table in the query path, isolated so it can be swapped for a
+  learned classifier. Same class as the existing `FORWARD_CONNECTIVES`.
+- **Pre-existing, unchanged:** `brain_nlp` connective tables; `brain_learn`
+  hardcoding Wikipedia and a title-cased URL guess.
+
+### Open questions
+
+1. Narrator model allowed to rephrase but not to add facts? Deferred, safe to.
+2. Word-sense disambiguation (Function 7 step 3) still needs a vector layer
+   that does not exist. Answers are single-sense.
+3. The SSE contract documented in `client/src/brain3d/useAskStream.ts` is now
+   stale: `thinking` carries `plan`, and `answer` carries `answer`. Left for
+   whoever owns that file, since it was under concurrent edit.
+4. Gap admissions are surfaced but not yet fed into the crawl frontier
+   (Function 7 step 8).
+
+## 2026-09-05 — Scoping: `/api/brain/ask` query understanding + answer formatting
+
+**Status:** design proposal only. No code written. Awaiting sign-off on three questions.
+
+### What already exists (do not rebuild)
+
+The learn-on-demand path is built and verified live: Wikipedia crawl-on-miss →
+Neo4j upsert → `infer_links` 2-hop reasoning → SSE answer stream.
+
+| Capability | Where | Reached from `/ask`? |
+|---|---|---|
+| Direct associations (out-edges) | `brain_service._top_associations` | yes |
+| 2-hop derived links | `brain_service.infer_links` | yes |
+| 2-concept convergence | `brain_service.discover` | **no** |
+| Multi-origin convergence | `brain_service.discover_convergence` | **no** |
+| In-edges ("what X depends on") | *not implemented* | n/a |
+
+### Design intent already on record
+
+`AKKI_FULL_ARCHITECTURE.md` lines 307–332, **"Function 7 — Answer Formation"**,
+specifies both query understanding and answer shape. It is not referenced by the
+learn-on-demand plan or spec. Any work in this area should implement Function 7
+rather than invent a design.
+
+Function 7 step 6 defines the answer schema directly: what the concept depends
+on, what it produces, hidden convergences from unrelated origins, and connections
+nobody usually makes. Each maps onto an existing or near-existing graph op
+(in-edges / out-edges / `discover_convergence` / `infer_links`).
+
+### Gaps found
+
+1. **No query parsing exists.** `BrainAskRequest` (`backend/schemas.py:153`) has a
+   single field, `concept: str`. `backend/main.py:3958` lowercases the whole
+   string and uses it as a Neo4j node key, so a full question sentence becomes a
+   literal node lookup and then a verbatim Wikipedia opensearch term.
+2. **Direction is stored but never read backwards.** Edges are genuinely directed
+   (`brain_nlp` derives subject→object from the dependency parse), but
+   `_top_associations` only ever matches `(a)-[r:CO_OCCURS]->(b)`. Half the
+   causal information in the graph is unreachable. One reversed Cypher query
+   unlocks it — the cheapest high-value fix in this area.
+3. **Provenance is discarded.** `learn_concept` returns `sources`; the `/ask`
+   generator uses only `new_concepts` and `new_edges`. The brain cannot cite what
+   it just read.
+4. **No answer formatting layer.** The answer event is a raw bag of
+   `{word,g2,count}` + `{concept,via,strength}`; `client/src/pages/brain.tsx:378`
+   renders the summary as literally "N associations, M inferred links".
+
+### Alternatives considered and rejected
+
+- **LLM for query intent parsing / prose answers.** Rejected as a routine choice.
+  The design spec §3 lists "Any LLM in the answer path" as an explicit non-goal,
+  and `AKKI_FULL_ARCHITECTURE.md` says "Never asks LLM after Phase 1". Adopting it
+  reverses two documents and requires explicit human sign-off, so it is raised as
+  an open question rather than decided.
+- **A new NLU dependency.** Rejected — spaCy is already loaded by `brain_nlp`.
+  Reusing it costs nothing and keeps query-term normalization identical to the
+  normalization used when writing node keys, which currently can silently mismatch.
+- **Breaking the existing `associations` / `inferred` arrays into a new shape.**
+  Rejected — the 3D scene consumes them and `brain3d` was under concurrent edit.
+  Any new answer structure must be additive; `useAskStream` ignores unknown keys.
+
+### Hardcoded assumptions that violate the project charter (flagged, not fixed)
+
+- `backend/services/brain_learn.py` hardcodes Wikipedia as the sole source
+  (`_OPENSEARCH_URL`, `fetch_wikipedia`) **and** hardcodes a URL format — a
+  title-cased guess turning `quantum tunneling` into `Quantum_Tunneling`. This is
+  both a hardcoded seed and a hardcoded URL format.
+- `backend/services/brain_nlp.py` hardcodes `FORWARD_CONNECTIVES`,
+  `BACKWARD_CONNECTIVES`, and `_SKIP_VERBS` — predefined linguistic rules rather
+  than direction discovered from position statistics.
+- Consequence: the charter is already violated in-tree, so "no hardcoded rules"
+  is currently an aspiration, not an invariant. Worth an explicit ruling before
+  more rule tables are added.
+
+### Open questions
+
+1. Should the spoken answer be a deterministic sentence composed from graph edges
+   by template, or fluent prose (which in practice requires an LLM and reverses a
+   stated non-goal)?
+2. Function 7 step 3, "determine which meaning cluster is being asked about",
+   needs the vector/meaning layer (pgvector or ChromaDB). It does not exist; the
+   graph is single-sense per word. Defer, or build it now?
+3. Intent classification needs some interrogative signal. spaCy morphology
+   (question tag, root verb lemma, wh-token POS, noun-chunk count) avoids literal
+   word lists but leans on a pretrained parser. A hardcoded question-word map is
+   simpler but is exactly what the charter forbids. Which side?
+4. `AKKI_INTERNET_BRAIN.md` is referenced by the agent task brief but does not
+   exist in the repo. Is `AKKI_FULL_ARCHITECTURE.md` the authoritative document,
+   or is there a separate one?

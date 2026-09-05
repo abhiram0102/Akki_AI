@@ -3951,15 +3951,29 @@ async def brain_ask(
     the web if it doesn't know enough yet, then answer with associations +
     derived (inferred) links — streamed as Server-Sent Events."""
     from sse_starlette.sse import EventSourceResponse
-    from backend.services import brain_service, brain_learn
+    from backend.services import brain_service, brain_learn, brain_query, brain_answer, brain_curiosity
     from backend.services.neo4j_service import get_driver
+    from starlette.concurrency import run_in_threadpool
     import httpx
 
-    concept = body.concept.strip().lower()
+    # Understand the question before touching the graph. Posting a bare
+    # `concept` still parses to a DEFINE on that single topic, so the previous
+    # behaviour is preserved exactly for existing clients.
+    raw_query = (body.query or body.concept or "").strip()
+    if not raw_query:
+        raise HTTPException(status_code=422, detail="Provide either `query` or `concept`")
+
+    # spaCy parsing is CPU-bound and blocking; keep it off the event loop.
+    plan = await run_in_threadpool(brain_query.parse, raw_query)
+    concept = plan.primary or raw_query.lower()
     LEARN_THRESHOLD = int(os.getenv("LEARN_THRESHOLD", "3"))
 
     async def gen():
-        yield {"data": json.dumps({"stage": "thinking", "concept": concept})}
+        # `concept` stays on the thinking event for existing consumers; `plan`
+        # is additive so a client that ignores it behaves as it always did.
+        yield {"data": json.dumps({"stage": "thinking", "concept": concept, "plan": plan.as_dict()})}
+        sources: list[str] = []
+        min_count = brain_service.MIN_EDGE_COUNT
         assoc = await brain_service._top_associations(concept)
         if len(assoc) < LEARN_THRESHOLD:
             yield {"data": json.dumps({"stage": "gap", "concept": concept})}
@@ -3967,12 +3981,18 @@ async def brain_ask(
             try:
                 async with httpx.AsyncClient(timeout=30, headers=brain_learn.UA_HEADERS) as client:
                     learned = await brain_learn.learn_concept(concept, client, get_driver())
+                # Provenance was previously computed here and thrown away; the
+                # brain can now say what it actually read.
+                sources = learned.get("sources", []) or []
                 yield {"data": json.dumps({
                     "stage": "grew",
                     "new_concepts": learned["new_concepts"],
                     "new_edges": learned["new_edges"],
                 })}
-                assoc = await brain_service._top_associations(concept, min_count=1)
+                # Freshly learned edges have been seen once, so the usual noise
+                # floor would hide everything just read.
+                min_count = 1
+                assoc = await brain_service._top_associations(concept, min_count=min_count)
             except Exception:
                 yield {"data": json.dumps({
                     "stage": "answer",
@@ -3983,13 +4003,43 @@ async def brain_ask(
                 })}
                 yield {"data": json.dumps({"stage": "done"})}
                 return
-        inferred = await brain_service.infer_links(concept, min_count=1)
+        inferred = await brain_service.infer_links(concept, min_count=min_count)
+        # Hand over what has already been fetched so the composer reads only
+        # the in-edges it adds, and so the spoken answer cannot disagree with
+        # the `associations`/`inferred` lists reported alongside it.
+        answer = await brain_answer.build(
+            plan, min_count=min_count, sources=sources, produces=assoc, derived=inferred,
+        )
         yield {"data": json.dumps({
+            # `associations` and `inferred` are unchanged and stay first —
+            # the 3D scene reads them and must keep working untouched.
             "stage": "answer",
             "concept": concept,
             "associations": assoc,
             "inferred": inferred,
+            # Everything below is additive (Function 7 step 6).
+            "answer": answer,
         })}
+
+        # Function 7 step 8 / Function 8: what this answer was least sure about
+        # becomes reading for later. Selection is pure and already done; the
+        # queueing runs AFTER the answer has been streamed, so it adds no
+        # latency and the answer itself still reached no network.
+        curious_about = brain_curiosity.select_gaps(answer)
+        if curious_about:
+            try:
+                async with httpx.AsyncClient(timeout=15, headers=brain_learn.UA_HEADERS) as client:
+                    queued = await brain_curiosity.queue_reading(
+                        curious_about, client, brain_learn.resolve_wikipedia_title,
+                    )
+                if queued:
+                    yield {"data": json.dumps({
+                        "stage": "curious", "concepts": curious_about, "queued": queued,
+                    })}
+            except Exception:
+                # Curiosity is a bonus, never a reason to break a good answer.
+                pass
+
         yield {"data": json.dumps({"stage": "done"})}
 
     return EventSourceResponse(gen(), headers={"X-Accel-Buffering": "no"})

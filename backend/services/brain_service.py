@@ -58,6 +58,31 @@ async def _top_associations(concept: str, limit: int = 20, min_count: int = MIN_
         return [{"word": r["word"], "g2": r["g2"], "count": r["count"]} async for r in result]
 
 
+async def _top_dependencies(concept: str, limit: int = 20, min_count: int = MIN_EDGE_COUNT) -> list[dict]:
+    """The reverse of `_top_associations`: concepts that point AT `concept`.
+
+    Edges are genuinely directed — `brain_nlp` orients every one of them from
+    the dependency parse (subject->object, with the FORWARD/BACKWARD connective
+    tables flipping cause vs prerequisite). Until now nothing ever read them
+    backwards, so half the causal information in the graph was unreachable:
+    out-edges answer "what does X produce", and only these in-edges answer
+    "what does X depend on" / "what causes X".
+
+    This is Function 7 step 6's first bullet ("what this concept depends on")
+    in AKKI_FULL_ARCHITECTURE.md, and it costs one reversed arrow.
+    """
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            "MATCH (a:Concept)-[r:CO_OCCURS]->(b:Concept {word: $concept}) "
+            "WHERE r.count >= $min_count "
+            "RETURN a.word AS word, r.g2 AS g2, r.count AS count "
+            "ORDER BY r.g2 DESC LIMIT $limit",
+            concept=concept, limit=limit, min_count=min_count,
+        )
+        return [{"word": r["word"], "g2": r["g2"], "count": r["count"]} async for r in result]
+
+
 async def _reachable_with_depth(concept: str, max_depth: int = 3, min_count: int = MIN_EDGE_COUNT) -> dict[str, int]:
     """Concepts reachable from `concept` within max_depth hops, traversing only
     edges seen at least min_count times (so one-off co-occurrences don't

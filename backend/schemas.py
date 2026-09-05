@@ -152,8 +152,17 @@ class BrainConvergeRequest(BaseModel):
 
 class BrainAskRequest(BaseModel):
     """Ask the brain about a concept — streams thinking/learning/answer
-    stages over SSE from POST /api/brain/ask."""
-    concept: str
+    stages over SSE from POST /api/brain/ask.
+
+    `query` carries a natural question ("why does inflation happen") and is
+    parsed by `brain_query` into an intent plus the concepts it names. `concept`
+    is the original single-term field and still works unchanged: posting a bare
+    concept parses to a DEFINE on that one topic, which is exactly the previous
+    behaviour. Both are optional so either style of client is valid; `query`
+    wins when both are sent.
+    """
+    concept: str | None = None
+    query: str | None = None
 
 
 class TutorQuizRequest(BaseModel):
