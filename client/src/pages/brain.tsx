@@ -245,6 +245,12 @@ export default function BrainPage() {
     setAskGraphNodes([{ id: c, label: c, activation: 1 }]);
     setAskGraphEdges([]);
     setAskActivePath([]);
+    // Mirror the other three modes' own "clear stale results" behavior
+    // (runAssociate/runConnect/runConverge all do `setNodes([]); setEdges([])`
+    // at the start of their run) so the 2D fallback doesn't keep showing a
+    // *previous* concept's answer while this new query is in flight.
+    setNodes([]);
+    setEdges([]);
     ask(c);
   };
 
@@ -306,6 +312,52 @@ export default function BrainPage() {
 
     setAskGraphEdges(newEdges);
     setAskActivePath(newEdges.map((e) => e.id));
+
+    // ── 2D fallback (legacy `nodes`/`edges`) population ──────────────────
+    // `askGraphNodes`/`askGraphEdges` (above) only feed <BrainScene>
+    // (WebGL). Whenever WebGL is unavailable, <BrainFieldFallback> renders
+    // off the legacy `nodes`/`edges` state instead — which `runAsk()` never
+    // populated, leaving Ask mode's 2D fallback permanently on its "field is
+    // dark" empty state (the gap this task fixes). Derive a parallel
+    // FieldNode[]/FieldEdge[] set in exactly the shape `runAssociate`
+    // already produces: a `kind:"center"` node at {50,50}, associations +
+    // inferred links laid out on the same `ring(count, 50, 50, 34)` used
+    // elsewhere, `strength` normalized the same way (`g2`/`maxG2` for
+    // associations; inferred already carries a 0..1 `strength`).
+    const fieldItems = [
+      ...assoc.map((a) => ({
+        id: a.word, label: a.word, strength: (a.g2 || 0) / maxG2,
+        detail: `G² ${Number(a.g2 || 0).toFixed(1)}`,
+      })),
+      ...inferred.map((i) => ({
+        id: i.concept, label: i.concept, strength: Math.min(1, Math.max(0, i.strength || 0)),
+        detail: i.via ? `via ${i.via}` : "derived",
+      })),
+    ];
+    const fieldPts = ring(fieldItems.length, 50, 50, 34);
+    const fieldCenter: FieldNode = { id: center, label: center, kind: "center", x: 50, y: 50, strength: 1, driftSeed: 0 };
+    const fieldStrengthById: Record<string, number> = { [center]: 1 };
+    const fieldNodes: FieldNode[] = [
+      fieldCenter,
+      ...fieldItems.map((n, i) => {
+        fieldStrengthById[n.id] = n.strength;
+        return {
+          id: n.id, label: n.label, kind: "assoc" as NodeKind,
+          x: fieldPts[i].x, y: fieldPts[i].y, strength: n.strength,
+          detail: n.detail, driftSeed: i + 1,
+        };
+      }),
+    ];
+    // Reuse `newEdges` (already deduped above, e.g. an association and an
+    // inferred `via` can both point at the same word) for topology, and pair
+    // each with its target node's normalized strength for the line's
+    // width/opacity — the same "edge strength == destination node strength"
+    // convention `runAssociate` uses.
+    const fieldEdges: FieldEdge[] = newEdges.map((e) => ({
+      from: e.from, to: e.to, strength: fieldStrengthById[e.to] ?? 0.5,
+    }));
+    setNodes(fieldNodes);
+    setEdges(fieldEdges);
   }, [askAnswer]);
 
   const askGraph = useMemo<BrainSceneGraph>(
@@ -342,6 +394,18 @@ export default function BrainPage() {
     nodes.forEach((n) => (m[n.id] = n));
     return m;
   }, [nodes]);
+
+  // `loading` (set by runAssociate/runConnect/runConverge) is never touched
+  // by Ask mode — Ask's own in-flight signal is `askStage`. Rather than
+  // overload the shared `loading` boolean with a second writer (runAsk),
+  // derive Ask mode's "waiting on the field" state straight from `askStage`:
+  // true from the moment a query is submitted (thinking/gap/learning/grew)
+  // until an answer (or error) actually lands. This also keeps
+  // BrainFieldFallback's empty-state message ("The field is dark") from
+  // flashing between runAsk()'s `setNodes([])` and the answer arriving.
+  const askFieldLoading = askStage === "thinking" || askStage === "gap" || askStage === "learning" || askStage === "grew";
+  const fallbackLoading = mode === "ask" ? askFieldLoading : loading;
+  const fallbackError = mode === "ask" ? (askStage === "error" ? "The field went quiet — check your connection." : null) : error;
 
   const addSeed = () => {
     const s = seedDraft.trim().toLowerCase();
@@ -388,7 +452,7 @@ export default function BrainPage() {
       {mode === "ask" && webglAvailable ? (
         <BrainScene ref={sceneRef} graph={askGraph} className="akki-brain-scene" />
       ) : (
-        <BrainFieldFallback nodes={nodes} edges={edges} reduced={reduced} loading={loading} error={error} nodeById={nodeById} />
+        <BrainFieldFallback nodes={nodes} edges={edges} reduced={reduced} loading={fallbackLoading} error={fallbackError} nodeById={nodeById} />
       )}
 
       {/* floating glass query bar */}
