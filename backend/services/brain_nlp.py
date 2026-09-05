@@ -16,6 +16,14 @@ FORWARD_CONNECTIVES = {"cause", "lead", "produce", "create", "enable", "trigger"
 BACKWARD_CONNECTIVES = {"require", "need", "depend", "rely", "stem"}
 
 
+# Only nouns and proper nouns are kept as concepts. This filters out
+# function words (pronouns like "you"/"it"/"that", determiners, auxiliaries)
+# that spaCy legitimately attaches as the nsubj/dobj/pobj of a connective
+# verb but which are noise as graph concepts — the dominant source of junk
+# associations observed when crawling prose-heavy sources.
+_CONTENT_POS = {"NOUN", "PROPN"}
+
+
 def get_nlp():
     global _NLP
     if _NLP is None:
@@ -23,24 +31,34 @@ def get_nlp():
     return _NLP
 
 
+def _concept_lemma(token) -> str | None:
+    """Return a token's lowercased lemma if it is a content-word concept
+    (a non-stop noun/proper noun of length >= 3), else None."""
+    if token.is_stop or not token.is_alpha or len(token.lemma_) < 3:
+        return None
+    if token.pos_ not in _CONTENT_POS:
+        return None
+    return token.lemma_.lower()
+
+
 def _subject_of(token) -> str | None:
     for child in token.children:
         if child.dep_ in ("nsubj", "nsubjpass"):
-            return child.lemma_.lower()
+            return _concept_lemma(child)
     return None
 
 
 def _object_of(token) -> str | None:
     for child in token.children:
         if child.dep_ in ("dobj", "obj"):
-            return child.lemma_.lower()
+            return _concept_lemma(child)
     # "leads to X" / "results in X" / "depends on X" — object is inside a
     # prepositional phrase (prep -> pobj).
     for child in token.children:
         if child.dep_ == "prep":
             for grandchild in child.children:
                 if grandchild.dep_ == "pobj":
-                    return grandchild.lemma_.lower()
+                    return _concept_lemma(grandchild)
     return None
 
 

@@ -47,3 +47,25 @@ def test_no_connective_returns_empty():
     # No token lemma is in FORWARD_CONNECTIVES or BACKWARD_CONNECTIVES.
     result = extract_dependencies("The sky is blue.")
     assert result == []
+
+
+def test_pronoun_object_is_filtered_out():
+    # "The licence requires you" — "you" is a pronoun (PRON, stop word), not a
+    # content-word concept, so no pair should be emitted even though the
+    # dependency structure (requires/BACKWARD, nsubj=licence, dobj=you) matches.
+    # This is the association-quality filter: function words never become concepts.
+    result = extract_dependencies("The licence requires you.")
+    assert result == []
+
+
+def test_pronoun_subject_is_filtered_out():
+    # "It causes damage" — "It" is a pronoun subject; with the subject filtered
+    # to None, no (cause, effect) pair is emitted.
+    result = extract_dependencies("It causes damage.")
+    assert result == []
+
+
+def test_content_words_still_extracted_after_filter():
+    # Sanity: the filter must not reject legitimate noun concepts.
+    result = extract_dependencies("Deforestation causes erosion.")
+    assert ("deforestation", "erosion") in result

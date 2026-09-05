@@ -57,13 +57,18 @@ def _signal_handler(sig, frame):
 
 
 async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: RateLimiter,
-                          neo4j_driver, pg_session) -> bool:
-    """Fetch, extract, and persist one frontier entry. Returns True on success."""
+                          neo4j_driver, pg_session) -> int | None:
+    """Fetch, extract, and persist one frontier entry.
+
+    Returns the number of sentences learned from the page on success (an int
+    >= 0), or None if the page was skipped (robots.txt disallow) or failed to
+    fetch. Callers treat `None` as failure and any int as success.
+    """
     url, concept, source_type = entry["url"], entry["concept"], entry["source_type"]
 
     if not await robots.allowed(url, client):
         logger.info("Skipping (robots.txt disallows): %s", url)
-        return False
+        return None
 
     await limiter.wait(url)
 
@@ -73,7 +78,7 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
         text, links = await fetcher(url, client)
     except Exception as e:
         logger.warning("Fetch failed for %s: %s", url, e)
-        return False
+        return None
 
     # Minimum 3 words: the grammatical floor for extract_dependencies to find
     # a subject-verb-object triple (e.g. "Fire causes heat" == 3 words).
@@ -169,7 +174,7 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
         )
 
     await pg_session.commit()
-    return True
+    return len(sentences)
 
 
 async def _record_failure(pg_session, url: str, source_type: str, error: str) -> None:
@@ -251,18 +256,19 @@ async def main() -> None:
                         break
                     entry_dict = {"url": entry.url, "concept": entry.concept, "source_type": entry.source_type}
                     try:
-                        ok = await crawl_one_page(entry_dict, client, robots, limiter, neo4j_driver, pg_session)
+                        sentences_learned = await crawl_one_page(entry_dict, client, robots, limiter, neo4j_driver, pg_session)
                     except Exception as e:
                         logger.error("Unhandled error crawling %s: %s", entry.url, e, exc_info=True)
-                        ok = False
+                        sentences_learned = None
 
-                    if ok:
+                    if sentences_learned is not None:
                         stats_result = await pg_session.execute(select(BrainStats).where(BrainStats.id == "singleton"))
                         stats = stats_result.scalar_one_or_none()
                         if stats is None:
                             stats = BrainStats(id="singleton", total_pages=0, total_sentences=0)
                             pg_session.add(stats)
                         stats.total_pages += 1
+                        stats.total_sentences += sentences_learned
                         await pg_session.commit()
                         pages_since_prune += 1
                     else:
