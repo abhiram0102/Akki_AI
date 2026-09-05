@@ -35,8 +35,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // as `associations`/`inferred`, just oriented per the intent — e.g. `dependsOn`
 // reads the graph's in-edges, something nothing read before this), a
 // deterministically templated `summary` sentence, an unprompted `observation`,
-// an honest `gap`, a `confidence` score, and `provenance` (source URLs
-// actually read). Every clause in it is composed from real graph edges —
+// an honest `gap`, a `confidence` score, which `sense` of the concept the
+// answer settled on (null when it only has one known meaning — backend/
+// services/brain_meaning.py's embedding+clustering "meaning layer"), and
+// `provenance` (source URLs actually read). Every clause in it is composed
+// from real graph edges —
 // nothing in the answer path is LLM-generated. `associations` and `inferred`
 // are unchanged and still come first in the payload, so any consumer that
 // ignores `plan`/`answer` behaves exactly as before.
@@ -188,6 +191,15 @@ export interface AskComposedAnswer {
   observation: string | null;
   gap: string | null;
   confidence: number;
+  /**
+   * Which meaning of the concept this answer is about, or null when the
+   * concept has only one known sense. `label` names the sense (e.g. "heat,
+   * fuel, combustion" vs "passion, desire"); `example` is one real sentence
+   * it was drawn from. `observation` already says this in words when present
+   * -- worth rendering distinctly anyway, since a confident answer about the
+   * wrong sense of a word is the most misleading thing this brain can do.
+   */
+  sense: { sense: number; label: string[]; contextCount: number; example: string } | null;
   provenance: string[];
 }
 

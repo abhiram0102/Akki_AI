@@ -378,13 +378,19 @@ export default function BrainPage() {
         if (askAnswer?.note) return askAnswer.note;
         const summary = askAnswer?.answer?.summary;
         if (summary) {
+          // A concept with more than one known meaning gets a prefix naming
+          // which one this answer is about — a confident answer about the
+          // wrong sense of a word is the most misleading thing this brain
+          // can do, so that ambiguity is surfaced rather than left implicit.
+          const sense = askAnswer?.answer?.sense;
+          const withSense = sense?.label.length ? `[${sense.label.join(", ")}] ${summary}` : summary;
           // `curious` lands after `answer` when the brain queued its weakest
           // spots to go read on its own — say so instead of blanking the
           // summary back out (see useAskStream's contract doc).
           if (askStage === "curious" && askCuriosity?.concepts.length) {
-            return `${summary} (still exploring: ${askCuriosity.concepts.join(", ")}…)`;
+            return `${withSense} (still exploring: ${askCuriosity.concepts.join(", ")}…)`;
           }
-          return summary;
+          return withSense;
         }
         if (askAnswer) return `${askAnswer.associations.length} associations, ${askAnswer.inferred.length} inferred links`;
         return "";
