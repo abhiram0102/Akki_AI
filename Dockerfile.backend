@@ -1,0 +1,58 @@
+# ── AKKI AI — Backend (FastAPI + Python 3.10) ────────────────────────────────
+FROM python:3.10-slim
+
+# System deps required by some packages (asyncpg, bcrypt, PyMuPDF), plus the
+# real security binaries the exploit tools shell out to (nmap, nikto, hydra,
+# hashcat, john, sqlmap) and gobuster (pinned GitHub release binary).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        libpq-dev \
+        libmupdf-dev \
+        libffi-dev \
+        nmap \
+        hydra \
+        hashcat \
+        john \
+        sqlmap \
+        perl \
+        libnet-ssleay-perl \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && case "$(dpkg --print-architecture)" in arm64) GOBARCH=arm64 ;; *) GOBARCH=x86_64 ;; esac \
+    && curl -fsSL -o /tmp/gobuster.tar.gz \
+        "https://github.com/OJ/gobuster/releases/download/v3.6.0/gobuster_Linux_${GOBARCH}.tar.gz" \
+    && tar -xzf /tmp/gobuster.tar.gz -C /usr/local/bin gobuster \
+    && rm /tmp/gobuster.tar.gz \
+    && chmod +x /usr/local/bin/gobuster \
+    # nikto is not packaged in Debian trixie — install from source with a
+    # `nikto` wrapper on PATH so the exploit tool can call it uniformly.
+    && curl -fsSL -o /tmp/nikto.tar.gz \
+        "https://github.com/sullo/nikto/archive/refs/tags/2.5.0.tar.gz" \
+    && mkdir -p /opt/nikto \
+    && tar -xzf /tmp/nikto.tar.gz -C /opt/nikto --strip-components=1 \
+    && rm /tmp/nikto.tar.gz \
+    && printf '#!/bin/sh\nexec perl /opt/nikto/program/nikto.pl "$@"\n' > /usr/local/bin/nikto \
+    && chmod +x /usr/local/bin/nikto
+
+WORKDIR /app
+
+# Install Python deps first (cache layer — only rebuilds when requirements change)
+COPY backend/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt \
+ && python -m spacy download en_core_web_sm
+
+# Copy backend source
+COPY backend/ ./backend/
+
+# Expose FastAPI port
+EXPOSE 5000
+
+# 2 workers: enough for typical load; bump via UVICORN_WORKERS env var
+CMD uvicorn backend.main:app \
+      --host 0.0.0.0 \
+      --port 5000 \
+      --workers ${UVICORN_WORKERS:-2} \
+      --proxy-headers \
+      --forwarded-allow-ips="*"
