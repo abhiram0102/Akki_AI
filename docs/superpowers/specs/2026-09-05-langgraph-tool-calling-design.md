@@ -181,14 +181,55 @@ Postgres checkpointer (docker-compose `db`) with an active-tool script.
   decision — but a future "local-only" switch would pin the loop to Ollama
   and is explicitly a later option.
 
-## Open questions for the user (must resolve before a plan is written)
+## Resolved questions
 
-1. **Active-tool reconciliation** (the important one): keep the 6 exploit
-   tools strictly UI-only (interrupt gate reserved for a future agent-tool
-   class), or make them agent-invokable behind the LangGraph interrupt gate
-   and relax the UI-only guard? This changes both this design and the
-   exploit-tools plan's Task 5.
-2. Should conversation memory across turns (persistent `thread_id` state) be
-   turned on now, or just the tool-calling loop + checkpointer plumbing, with
-   memory as a follow-up?
-3. Iteration cap of 5 — acceptable default, or different?
+1. **Active-tool reconciliation — RESOLVED (2026-09-05):** the user wants
+   fully autonomous, infrastructural agents that decide + call + execute
+   tools. Decision: the attacking tools **ARE agent-invokable, behind the
+   LangGraph interrupt approval gate** — the graph pauses before firing any
+   active tool, surfaces the tool + target for the user to approve, and only
+   then executes. This **supersedes the exploit-tools plan's revised Task 5**
+   (which guarded that active tools are NEVER agent-callable). When the
+   exploit tools are built, Task 5 must be re-revised: active tools become
+   agent-callable but every such call routes through the interrupt gate; the
+   guard becomes "no active tool executes without an approval interrupt,"
+   not "no active tool is agent-callable."
+
+## Status (2026-09-05)
+
+- **Phase 1 — BUILT & TESTED.** Real ReAct loop (router → reason → tools →
+  loop) wired into `langgraph_agent_service.py`; provider-agnostic
+  JSON-tool-call parsing; per-agent tool scoping; 5-call cap; 14 tests.
+- **Phase 2 — BUILT & TESTED.** The 6 active tools are agent-callable (scoped
+  to the analyst persona) behind a LangGraph `interrupt()` approval gate in
+  `tool_execution_node`; `resume_message()` + `POST /api/protected/chat/resume`
+  continue the paused run on approval; a Postgres `AsyncPostgresSaver`
+  checkpointer (lazy-initialized from `DATABASE_URL`, falling back to
+  in-memory) makes the paused state durable across workers. 5 interrupt/
+  resume tests. The interrupt is raised before any state mutation so the
+  node re-runs idempotently on resume.
+- **Caveat:** a real LLM-driven end-to-end (chat → agent decides to attack →
+  pause → approve → run) depends on the external LLM actually emitting the
+  tool-call JSON; the interrupt/resume machinery itself is proven via the
+  graph with a scripted model. `vuln_scan` remains slow (see exploit spec).
+
+## Build sequencing
+
+- **Phase 1 — the real tool-calling loop (build first, delivers the core
+  value immediately):** wire a real `tool_node` + conditional edge + ReAct
+  loop into `build_agent_graph()`, using the 11 existing real recon tools.
+  Agents genuinely decide → call → execute → observe → loop → answer. A
+  single turn's loop lives inside one process invocation, so `MemorySaver`
+  is sufficient for Phase 1 (no interrupt/resume yet). This is shippable and
+  testable on its own.
+- **Phase 2 — persistent checkpointer + approval-gate interrupt:** swap in
+  the Postgres checkpointer and add `interrupt_before` on the tool node for
+  `ACTIVE_TOOLS`, plus the `POST /api/chat/resume` endpoint. Requires the
+  exploit tools (or at least `ACTIVE_TOOLS`) to exist to be meaningful.
+
+## Remaining smaller defaults (chosen, not blocking)
+
+- Conversation memory across turns: deferred to a follow-up; Phase 1/2 focus
+  on the tool-calling loop and the interrupt, not long-term `thread_id`
+  memory.
+- Iteration cap: 5 tool calls per turn (default; trivially tunable).
