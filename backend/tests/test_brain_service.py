@@ -61,6 +61,56 @@ class TestDiscoverConvergence:
         assert any(c["concept"] == "transformation" for c in result["convergencePoints"])
 
 
+def _fake_driver_by_c1(reach_by_seed: dict):
+    """Fake driver that returns each seed's reachable set based on the `c1`
+    query param — needed for convergence, which iterates seeds in
+    nondeterministic set order."""
+    driver = MagicMock()
+
+    async def run(query, **params):
+        seed = params.get("c1")
+        recs = [{"word": w, "depth": d} for w, d in reach_by_seed.get(seed, {}).items()]
+        return _make_result(recs)
+
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = session_cm
+    session_cm.__aexit__.return_value = False
+    session_cm.run = run
+    driver.session.return_value = session_cm
+    return driver
+
+
+class TestMultiOriginConvergence:
+    async def test_ranks_by_number_of_independent_origins(self, monkeypatch):
+        # 'transformation' is reached from all three unrelated seeds → strongest.
+        reach = {
+            "fire": {"transformation": 2, "energy": 1},
+            "music": {"transformation": 3, "rhythm": 1},
+            "biology": {"transformation": 2, "cell": 1},
+        }
+        monkeypatch.setattr(brain_service, "get_driver", lambda: _fake_driver_by_c1(reach))
+        result = await brain_service.discover_convergence(["fire", "music", "biology"], min_origins=2)
+        pts = result["convergencePoints"]
+        assert pts[0]["concept"] == "transformation"
+        assert pts[0]["originCount"] == 3
+        assert pts[0]["origins"] == ["biology", "fire", "music"]
+        # single-origin concepts (energy/rhythm/cell) are below the floor.
+        assert all(p["originCount"] >= 2 for p in pts)
+
+    async def test_seeds_themselves_are_not_convergence_points(self, monkeypatch):
+        reach = {"fire": {"music": 1, "x": 2}, "music": {"fire": 1, "x": 2}}
+        monkeypatch.setattr(brain_service, "get_driver", lambda: _fake_driver_by_c1(reach))
+        result = await brain_service.discover_convergence(["fire", "music"], min_origins=2)
+        concepts = {p["concept"] for p in result["convergencePoints"]}
+        assert "fire" not in concepts and "music" not in concepts
+        assert "x" in concepts  # reached from both, and not itself a seed
+
+    async def test_too_few_seeds_returns_error(self, monkeypatch):
+        monkeypatch.setattr(brain_service, "get_driver", lambda: _fake_driver_by_c1({}))
+        result = await brain_service.discover_convergence(["fire"], min_origins=2)
+        assert "error" in result
+
+
 class TestGetStatus:
     async def test_reads_pg_stats_and_neo4j_counts(self, monkeypatch):
         # First call = concept count query, second call = edge count query
