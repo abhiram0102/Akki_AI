@@ -226,7 +226,12 @@ export default function BrainPage() {
   };
 
   const runAsk = () => {
-    const c = concept.trim();
+    // Lowercased to match the backend's own normalization
+    // (`backend/main.py`: `concept = body.concept.strip().lower()`),
+    // whose SSE events echo back that lowercased value as `answer.concept`.
+    // The root node id must agree with it, or edges/activation updates
+    // keyed on the echoed concept silently miss the actual graph node.
+    const c = concept.trim().toLowerCase();
     if (!c) return;
     setError(null);
     askQueryIdRef.current += 1;
