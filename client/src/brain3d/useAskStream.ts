@@ -13,11 +13,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 //      — either the normal-path answer (`answer` present), or (if gap + learn
 //      failed) an empty answer carrying a "couldn't learn that one" note and
 //      NO `answer` object, followed immediately by done
-//   6. {stage:"done"}
+//   6. {stage:"curious", concepts:[], queued}              — OPTIONAL, only if
+//      the answer left something worth reading (own 2-hop guesses first, so
+//      the brain checks its own inferences rather than just confirming them)
+//   7. {stage:"done"}
 //
-// So a client sees one of three shapes: thinking→answer→done (known concept),
-// thinking→gap→learning→grew→answer→done (learned successfully), or
-// thinking→gap→learning→answer(empty+note)→done (learn failed).
+// So a client sees one of three shapes: thinking→answer→[curious]→done (known
+// concept), thinking→gap→learning→grew→answer→[curious]→done (learned
+// successfully), or thinking→gap→learning→answer(empty+note)→done (learn
+// failed, no `curious`). `curious` is always optional and always after
+// `answer` — treat "answer landed" (stage `answer` or later) as the moment to
+// render the summary, not stage === "answer" alone, or a `curious` event
+// after a good answer will blank it back out.
 //
 // `plan` (on "thinking") is `backend/services/brain_query.py`'s parsed
 // QueryPlan — the question run through spaCy (no LLM) and resolved to an
@@ -33,6 +40,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // nothing in the answer path is LLM-generated. `associations` and `inferred`
 // are unchanged and still come first in the payload, so any consumer that
 // ignores `plan`/`answer` behaves exactly as before.
+//
+// `curious` (Function 8 — the loop closing) is `backend/services/
+// brain_curiosity.py` queuing what the answer was least able to stand behind
+// onto the crawl frontier: `concepts` is what it picked (ranked by weakness,
+// capped at 3), `queued` how many actually got queued. This is the brain
+// deciding to go read more on its own, not a request the UI made — a good
+// moment to show "still exploring: X" rather than treat it as an error stage.
 //
 // Design choices (documented per the task brief's latitude grant):
 //
@@ -127,6 +141,7 @@ export type AskStage =
   | "learning"
   | "grew"
   | "answer"
+  | "curious"
   | "done"
   | "error";
 
@@ -190,12 +205,19 @@ export interface AskGrew {
   newEdges: number;
 }
 
+/** A `curious` event — the brain queuing its own weakest spots for later reading. */
+export interface AskCuriosity {
+  concepts: string[];
+  queued: number;
+}
+
 export interface UseAskStreamResult {
   ask(concept: string): void;
   stage: AskStage;
   plan: AskPlan | null;
   answer: AskAnswer | null;
   learnedNodes: AskGrew | null;
+  curiosity: AskCuriosity | null;
   aborting: boolean;
 }
 
@@ -204,6 +226,7 @@ export function useAskStream(): UseAskStreamResult {
   const [plan, setPlan] = useState<AskPlan | null>(null);
   const [answer, setAnswer] = useState<AskAnswer | null>(null);
   const [learnedNodes, setLearnedNodes] = useState<AskGrew | null>(null);
+  const [curiosity, setCuriosity] = useState<AskCuriosity | null>(null);
   const [aborting, setAborting] = useState(false);
 
   const controllerRef = useRef<AbortController | null>(null);
@@ -252,6 +275,7 @@ export function useAskStream(): UseAskStreamResult {
       setPlan(null);
       setAnswer(null);
       setLearnedNodes(null);
+      setCuriosity(null);
 
       (async () => {
         let ownAbortSeen = false;
@@ -321,6 +345,12 @@ export function useAskStream(): UseAskStreamResult {
             note: typeof evt.note === "string" ? evt.note : undefined,
             answer: evt.answer && typeof evt.answer === "object" ? (evt.answer as AskComposedAnswer) : undefined,
           });
+        } else if (s === "curious") {
+          setStage("curious");
+          setCuriosity({
+            concepts: Array.isArray(evt.concepts) ? (evt.concepts as string[]) : [],
+            queued: Number(evt.queued ?? 0),
+          });
         } else if (s === "done") {
           setStage("done");
         } else if (s === "error") {
@@ -331,5 +361,5 @@ export function useAskStream(): UseAskStreamResult {
     [abortInFlight, markAbortSettled]
   );
 
-  return { ask, stage, plan, answer, learnedNodes, aborting };
+  return { ask, stage, plan, answer, learnedNodes, curiosity, aborting };
 }

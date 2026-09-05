@@ -80,7 +80,7 @@ export default function BrainPage() {
   const runId = useRef(0);
 
   // ── Ask mode (3D, SSE-driven) ──────────────────────────────────────────
-  const { ask, stage: askStage, answer: askAnswer, learnedNodes: askGrew, aborting: askAborting } = useAskStream();
+  const { ask, stage: askStage, answer: askAnswer, learnedNodes: askGrew, curiosity: askCuriosity, aborting: askAborting } = useAskStream();
   const sceneRef = useRef<BrainSceneHandle>(null);
   const [askGraphNodes, setAskGraphNodes] = useState<BrainSceneNode[]>([]);
   const [askGraphEdges, setAskGraphEdges] = useState<BrainSceneEdge[]>([]);
@@ -372,16 +372,27 @@ export default function BrainPage() {
       case "learning": return "reading Wikipedia…";
       case "grew": return askGrew ? `learned ${askGrew.newConcepts} new concepts, ${askGrew.newEdges} new connections` : "growing…";
       case "answer":
-      case "done":
+      case "curious":
+      case "done": {
         if (askAborting) return "";
         if (askAnswer?.note) return askAnswer.note;
-        if (askAnswer?.answer?.summary) return askAnswer.answer.summary;
+        const summary = askAnswer?.answer?.summary;
+        if (summary) {
+          // `curious` lands after `answer` when the brain queued its weakest
+          // spots to go read on its own — say so instead of blanking the
+          // summary back out (see useAskStream's contract doc).
+          if (askStage === "curious" && askCuriosity?.concepts.length) {
+            return `${summary} (still exploring: ${askCuriosity.concepts.join(", ")}…)`;
+          }
+          return summary;
+        }
         if (askAnswer) return `${askAnswer.associations.length} associations, ${askAnswer.inferred.length} inferred links`;
         return "";
+      }
       case "error": return "The field went quiet — check your connection.";
       default: return "";
     }
-  }, [askStage, askGrew, askAnswer, askAborting]);
+  }, [askStage, askGrew, askAnswer, askCuriosity, askAborting]);
 
   const run = () => (
     mode === "ask" ? runAsk()
