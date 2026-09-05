@@ -1,0 +1,98 @@
+{
+  "discovery": {
+    "arxiv_attention": {
+      "delimiters": [
+        "<",
+        ">"
+      ],
+      "terminators": [
+        "(",
+        ")",
+        "]"
+      ],
+      "sentences": 18,
+      "textChars": 5085,
+      "meanSentenceWords": 13.44,
+      "links": 17,
+      "sameHostLinks": 17
+    },
+    "stanford_consciousness": {
+      "delimiters": [
+        "<",
+        ">"
+      ],
+      "terminators": [
+        "."
+      ],
+      "sentences": 835,
+      "textChars": 157041,
+      "meanSentenceWords": 18.8,
+      "links": 19,
+      "sameHostLinks": 19
+    },
+    "wikipedia_photosynthesis": {
+      "delimiters": [
+        "<",
+        ">"
+      ],
+      "terminators": [
+        "."
+      ],
+      "sentences": 582,
+      "textChars": 129592,
+      "meanSentenceWords": 15.54,
+      "links": 50,
+      "sameHostLinks": 50
+    }
+  },
+  "extraction": {
+    "arxiv_attention": {
+      "concepts": 2,
+      "relations": 1
+    },
+    "stanford_consciousness": {
+      "concepts": 103,
+      "relations": 57
+    },
+    "wikipedia_photosynthesis": {
+      "concepts": 127,
+      "relations": 88
+    }
+  },
+  "relationQuality": {
+    "cases": 15,
+    "truePositives": 9,
+    "falsePositives": 1,
+    "falseNegatives": 2,
+    "precision": 0.9,
+    "recall": 0.8182,
+    "f1": 0.8571,
+    "disagreements": [
+      {
+        "sentence": "Encryption protects data.",
+        "expected": [
+          [
+            "encryption",
+            "data"
+          ]
+        ],
+        "got": [
+          [
+            "encryption",
+            "datum"
+          ]
+        ]
+      },
+      {
+        "sentence": "Enzymes catalyse reactions.",
+        "expected": [
+          [
+            "enzyme",
+            "reaction"
+          ]
+        ],
+        "got": []
+      }
+    ]
+  }
+}

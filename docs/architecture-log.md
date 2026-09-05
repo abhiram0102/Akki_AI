@@ -4,6 +4,94 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 8) — An evaluation harness, and the first two defects it found
+
+**Status:** implemented and tested. 206 backend tests pass.
+
+### Why this came before more features
+
+Everything in this pipeline was tuned by looking at one or two pages. The unit
+tests prove specific behaviours still work, but nothing could answer the
+question that actually matters when changing a threshold: *did that help?*
+Without a number that moves, every future change is guesswork, and the cost of
+adding this only grows with the codebase.
+
+### What it measures
+
+`python -m backend.eval.run_eval`, over a fixed corpus of three real pages
+stored compressed in the repository:
+
+- **Yield per page** — what structure was discovered, how much readable text
+  came out, how many references, and how many concepts and relations the
+  extractor produced. These say whether a change made the brain read more of a
+  page or less of it.
+- **Relation quality** — precision, recall and F1 against hand-labelled
+  sentences in `gold_relations.py`. Yield can always be raised by accepting
+  noise, so it means nothing without precision beside it. The labels include
+  sentences that must yield *nothing*: a graph full of "X is Y" cannot answer
+  anything, so silence is a correct answer that gets checked for.
+
+The corpus is stored rather than fetched because an evaluation that hits the
+network measures the network. Pages change and sites rate-limit, so two runs
+would stop being comparable and the only thing that should move the numbers is
+a change to the code.
+
+### The baseline, first recorded
+
+| page | sentences | text | links | concepts | relations |
+|---|---|---|---|---|---|
+| arxiv_attention | 18 | 5,085 | 17 | 2 | 1 |
+| stanford_consciousness | 835 | 157,041 | 19 | 103 | 57 |
+| wikipedia_photosynthesis | 582 | 129,592 | 50 | 127 | 88 |
+
+Relation extraction: precision 0.90, recall 0.82, F1 0.86 over 15 cases.
+
+`backend/tests/test_eval_baseline.py` compares a fresh run against this and
+fails if quality drops or yield collapses. Tolerances are loose deliberately: a
+tripwire that fires on harmless changes gets switched off. **The guard was
+verified by deliberately degrading the prose filter and confirming it failed
+with the specific numbers that moved**, then reverting. An untested tripwire is
+worthless.
+
+### Two real defects the harness found immediately
+
+1. **"data" is stored as "datum".** The lemmatiser normalises it, so the graph
+   node is `datum`. This is internally consistent — a question about data
+   normalises the same way, so lookup still works — but it is user-visible: the
+   brain will say "Encryption drives datum." Every irregular plural has this
+   problem.
+2. **"Enzymes catalyse reactions" yields nothing.** A perfectly ordinary
+   scientific statement produces no relation at all, so sentences like it are
+   invisible to the graph. Worth investigating whether it is the verb, the
+   spelling, or the parse.
+
+Neither was fixed in this session. They are recorded because the harness
+existing is what makes them visible at all, and because fixing them now would
+mean changing extraction and the measuring instrument in the same commit.
+
+### Also confirmed, quantitatively
+
+The arXiv abstract page yields 2 concepts and 1 relation from 18 sentences.
+That page is almost worthless to learn from, which matches the qualitative
+finding in session 6 that it is mostly navigation. It stays in the corpus
+precisely because a page with little to offer is a case discovery has to
+survive.
+
+### Honest limitations
+
+- The gold labels are my own judgement, not an independent annotator's, so the
+  quality figure measures agreement with one reading rather than objective
+  truth. The pairs also use the extractor's own lemmatised form, which builds
+  in its normalisation.
+- The cases were written for the purpose rather than sampled from crawled
+  text, so they under-represent how messy real sentences are.
+- Nothing here measures the graph, convergence, or answer quality, because
+  those need a populated database. This covers discovery and extraction only.
+
+Both limitations are exactly the kind of thing a person with an information
+retrieval background would fix properly, and they are the reason the numbers
+above should be read as a regression instrument rather than a score.
+
 ## 2026-09-05 (session 7) — The curiosity loop now closes on itself
 
 **Status:** implemented and tested. 201 backend tests pass.

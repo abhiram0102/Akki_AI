@@ -1,0 +1,17 @@
+{
+  "wikipedia_photosynthesis": {
+    "url": "https://en.wikipedia.org/wiki/Photosynthesis",
+    "bytes": 964310,
+    "stored": 155302
+  },
+  "stanford_consciousness": {
+    "url": "https://plato.stanford.edu/entries/consciousness/",
+    "bytes": 181378,
+    "stored": 57626
+  },
+  "arxiv_attention": {
+    "url": "https://arxiv.org/abs/1706.03762",
+    "bytes": 43644,
+    "stored": 9463
+  }
+}
