@@ -19,13 +19,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from backend.database import AsyncSessionLocal
 from backend.models import BrainFrontier, BrainVisitedPage, BrainDeadLetter, BrainStats
+from backend.services import brain_learn
 from backend.services.neo4j_service import get_driver, ensure_schema
 from backend.services.brain_fetchers import (
     RobotsChecker, RateLimiter, fetch_wikipedia, fetch_arxiv,
     fetch_generic_article,
 )
 from backend.services.brain_nlp import extract_dependencies
-from backend.services.brain_stats_math import log_likelihood_ratio
 
 logger = logging.getLogger("akki.brain_crawler")
 
@@ -112,63 +112,7 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
         edge_counts[(cause, effect)] += 1
 
     async with neo4j_driver.session() as session:
-        updated_freq: dict[str, int] = {}
-        updated_total = 0
-
-        if word_freq:
-            # Upsert word frequencies AND the running global total-occurrence
-            # counter in one call, returning post-update values so G2 can be
-            # computed below without a second full read.
-            result = await session.run(
-                "UNWIND $words AS w "
-                "MERGE (c:Concept {word: w.word}) "
-                "ON CREATE SET c.frequency = w.count, c.first_seen = datetime() "
-                "ON MATCH SET c.frequency = c.frequency + w.count "
-                "WITH c, w "
-                "MERGE (m:Meta {id: 'singleton'}) "
-                "ON CREATE SET m.totalWordOccurrences = w.count "
-                "ON MATCH SET m.totalWordOccurrences = m.totalWordOccurrences + w.count "
-                "RETURN c.word AS word, c.frequency AS frequency, m.totalWordOccurrences AS total",
-                words=[{"word": w, "count": c} for w, c in word_freq.items()],
-            )
-            async for record in result:
-                updated_freq[record["word"]] = record["frequency"]
-                updated_total = record["total"]  # same value every row — last write wins, all consistent
-
-        if edge_counts:
-            # Upsert edge counts, returning the post-update count per edge.
-            result = await session.run(
-                "UNWIND $edges AS e "
-                "MATCH (a:Concept {word: e.cause}) "
-                "MATCH (b:Concept {word: e.effect}) "
-                "MERGE (a)-[r:CO_OCCURS]->(b) "
-                "ON CREATE SET r.count = e.count, r.last_updated = datetime() "
-                "ON MATCH SET r.count = r.count + e.count, r.last_updated = datetime() "
-                "RETURN e.cause AS cause, e.effect AS effect, r.count AS count",
-                edges=[{"cause": c, "effect": eff, "count": n} for (c, eff), n in edge_counts.items()],
-            )
-            updated_counts: dict[tuple[str, str], int] = {}
-            async for record in result:
-                updated_counts[(record["cause"], record["effect"])] = record["count"]
-
-            # Recompute G2 for every edge touched this page, using the
-            # post-update frequencies/total from above, then write it back —
-            # a third small batched call, not one per edge.
-            g2_updates = []
-            for (cause, effect), count in updated_counts.items():
-                freq_a = updated_freq.get(cause, count)
-                freq_b = updated_freq.get(effect, count)
-                if updated_total > 0:
-                    g2 = log_likelihood_ratio(count, freq_a, freq_b, updated_total)
-                    g2_updates.append({"cause": cause, "effect": effect, "g2": g2})
-
-            if g2_updates:
-                await session.run(
-                    "UNWIND $updates AS u "
-                    "MATCH (a:Concept {word: u.cause})-[r:CO_OCCURS]->(b:Concept {word: u.effect}) "
-                    "SET r.g2 = u.g2",
-                    updates=g2_updates,
-                )
+        await brain_learn.apply_to_graph(session, word_freq, edge_counts)
 
     await pg_session.execute(
         pg_insert(BrainVisitedPage).values(
@@ -237,7 +181,14 @@ async def main() -> None:
     limiter = RateLimiter(min_interval_seconds=1.0)
     pages_since_prune = 0
 
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+    # Wikipedia (and many sites) return 403 to the default httpx User-Agent;
+    # a descriptive browser-like UA is required to fetch article content.
+    _headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; AKKI-Brain/1.0; +knowledge-graph research crawler)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=_headers) as client:
         async with AsyncSessionLocal() as pg_session:
             # Seed the frontier if empty
             result = await pg_session.execute(select(BrainFrontier).limit(1))
