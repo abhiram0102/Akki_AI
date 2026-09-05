@@ -9,3 +9,7 @@ node_modules
 
 # Local meaning store (ChromaDB): derived data, rebuilt by reading.
 data/brain_meaning/
+
+# Python bytecode
+__pycache__/
+*.pyc
