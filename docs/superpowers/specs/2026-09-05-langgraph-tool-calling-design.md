@@ -168,6 +168,19 @@ Postgres checkpointer (docker-compose `db`) with an active-tool script.
 - No autonomous/background agent operation, texting/calling, or emotional
   state — those are separate vision-doc threads.
 
+## Decisions log
+
+- **2026-09-05 — LLM provider:** The user considered dropping all external
+  LLM APIs (motivation for building the brain). After clarifying that the
+  brain is non-generative and cannot produce conversational language, the
+  user chose to **keep the external LLMs (Gemini / Free Claude Code) for
+  now**, with the brain remaining a separate knowledge capability alongside
+  them. Going fully local (Ollama) or brain-only is deferred, not chosen.
+  This design's provider-agnostic ReAct loop already accommodates the current
+  external providers unchanged, so no design change results from this
+  decision — but a future "local-only" switch would pin the loop to Ollama
+  and is explicitly a later option.
+
 ## Open questions for the user (must resolve before a plan is written)
 
 1. **Active-tool reconciliation** (the important one): keep the 6 exploit
