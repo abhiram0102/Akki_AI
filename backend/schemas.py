@@ -22,6 +22,12 @@ class ChatMessageRequest(BaseModel):
     emotionalTone: Optional[str] = None
 
 
+class ChatResumeRequest(BaseModel):
+    """Resume a paused agent turn after approving/denying an active tool."""
+    sessionId: str
+    approved: bool
+
+
 class ProfileUpdateRequest(BaseModel):
     username: Optional[str] = None
     preferences: Optional[dict] = None
@@ -129,11 +135,25 @@ class ReportGenerationRequest(BaseModel):
 class ToolExecuteRequest(BaseModel):
     toolName: str
     params: dict
+    authorized: bool = False
 
 
 class BrainDiscoverRequest(BaseModel):
     concept: str
     concept2: str | None = None
+
+
+class BrainConvergeRequest(BaseModel):
+    """Multi-origin convergence: seed concepts to grow branches from."""
+    seeds: list[str]
+    maxDepth: int = 3
+    minOrigins: int = 2
+
+
+class BrainAskRequest(BaseModel):
+    """Ask the brain about a concept — streams thinking/learning/answer
+    stages over SSE from POST /api/brain/ask."""
+    concept: str
 
 
 class TutorQuizRequest(BaseModel):
