@@ -53,6 +53,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // capped at 3), `queued` how many actually got queued. This is the brain
 // deciding to go read more on its own, not a request the UI made — a good
 // moment to show "still exploring: X" rather than treat it as an error stage.
+// `reasons` (concept -> "unknown"/"derived"/"thin") says WHY each one was
+// picked — "derived" means it's checking its own unverified 2-hop guess,
+// which is a materially different (self-correcting) claim from "unknown"
+// (it just knows nothing yet), worth distinguishing if surfaced. `effectiveness`
+// is the per-reason track record (`measure_effectiveness()`): whether that
+// kind of bet has actually taught the brain anything before. A reason with
+// too little history is always still acted on, so a new kind can never be
+// silently starved by one bad read. Both are additive/optional.
 //
 // Design choices (documented per the task brief's latitude grant):
 //
@@ -229,10 +237,22 @@ export interface AskGrew {
   newEdges: number;
 }
 
+/** Why one concept got queued — `backend/services/brain_curiosity.py`'s REASON_* codes. */
+export type AskCuriosityReason = "unknown" | "derived" | "thin";
+
+/** Per-reason track record from `measure_effectiveness()` — how often that kind of bet has paid off. */
+export interface AskCuriosityEffectiveness {
+  [reason: string]: { reads: number; taught: number; rate: number } | undefined;
+}
+
 /** A `curious` event — the brain queuing its own weakest spots for later reading. */
 export interface AskCuriosity {
   concepts: string[];
   queued: number;
+  /** concept -> why it was queued. Additive; absent on an older backend. */
+  reasons?: Record<string, AskCuriosityReason>;
+  /** How well each reason has paid off historically. Additive. */
+  effectiveness?: AskCuriosityEffectiveness;
 }
 
 export interface UseAskStreamResult {
@@ -374,6 +394,14 @@ export function useAskStream(): UseAskStreamResult {
           setCuriosity({
             concepts: Array.isArray(evt.concepts) ? (evt.concepts as string[]) : [],
             queued: Number(evt.queued ?? 0),
+            reasons:
+              evt.reasons && typeof evt.reasons === "object"
+                ? (evt.reasons as Record<string, AskCuriosityReason>)
+                : undefined,
+            effectiveness:
+              evt.effectiveness && typeof evt.effectiveness === "object"
+                ? (evt.effectiveness as AskCuriosityEffectiveness)
+                : undefined,
           });
         } else if (s === "done") {
           setStage("done");

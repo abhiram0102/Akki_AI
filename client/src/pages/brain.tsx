@@ -391,9 +391,23 @@ export default function BrainPage() {
             : summary;
           // `curious` lands after `answer` when the brain queued its weakest
           // spots to go read on its own — say so instead of blanking the
-          // summary back out (see useAskStream's contract doc).
+          // summary back out (see useAskStream's contract doc). `reasons`
+          // (when present) tells the WHY: reading to verify its own 2-hop
+          // guess is a materially different, self-correcting move from
+          // reading because it simply knows nothing yet.
           if (askStage === "curious" && askCuriosity?.concepts.length) {
-            return `${withSense} (still exploring: ${askCuriosity.concepts.join(", ")}…)`;
+            const why = askCuriosity.concepts
+              .map((c) => {
+                const reason = askCuriosity.reasons?.[c];
+                const phrase =
+                  reason === "derived" ? "verifying my own guess"
+                  : reason === "thin" ? "thin evidence"
+                  : reason === "unknown" ? "unknown to me"
+                  : null;
+                return phrase ? `${c} (${phrase})` : c;
+              })
+              .join(", ");
+            return `${withSense} (still exploring: ${why}…)`;
           }
           return withSense;
         }
