@@ -53,7 +53,6 @@ import { AdaptiveDpr, OrbitControls } from "@react-three/drei";
 import { Bloom, ChromaticAberration, EffectComposer } from "@react-three/postprocessing";
 import NeuronField from "./NeuronField";
 import Signals, { type SignalEdge } from "./Signals";
-import BrainShell from "./BrainShell";
 import { regionForConcept } from "./regions";
 import { generateBrainPoints } from "./proceduralBrain";
 
@@ -355,8 +354,10 @@ const BrainScene = forwardRef<BrainSceneHandle, BrainSceneProps>(function BrainS
 
         <ClockBridge elapsedRef={elapsedRef} />
 
-        {/* Outer silhouette + hemisphere seam -- gives the neuron cloud a perceivable boundary to sit inside. */}
-        <BrainShell />
+        {/* BrainShell (procedural wireframe boundary) pulled back out -- it
+            read as visual noise rather than a clean brain outline. Real
+            anatomical model integration is the plan (Task 11 in the design
+            spec), pending the actual model file. */}
 
         {/* Ambient backdrop: dense, dim, non-growing procedural cloud giving the brain its shape. */}
         <NeuronField points={ambientPoints} maxCount={ambientCount} baseSize={3.2} />
