@@ -47,3 +47,9 @@ neo4j>=5.24.0
 spacy>=3.7.0
 feedparser>=6.0.11
 beautifulsoup4>=4.12.0
+
+# ── Agent approval-gate checkpointer (LangGraph Phase 2) ───────────────────
+# Persistent checkpointer so an agent's approval interrupt survives across
+# the app's multiple workers and restarts (falls back to in-memory if absent).
+langgraph-checkpoint-postgres>=2.0.0
+psycopg[binary]>=3.1
