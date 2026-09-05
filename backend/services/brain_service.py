@@ -45,7 +45,7 @@ async def get_status(pg_session) -> dict:
     }
 
 
-async def _top_associations(concept: str, limit: int = 20) -> list[dict]:
+async def _top_associations(concept: str, limit: int = 20, min_count: int = MIN_EDGE_COUNT) -> list[dict]:
     driver = get_driver()
     async with driver.session() as session:
         result = await session.run(
@@ -53,14 +53,14 @@ async def _top_associations(concept: str, limit: int = 20) -> list[dict]:
             "WHERE r.count >= $min_count "
             "RETURN b.word AS word, r.g2 AS g2, r.count AS count "
             "ORDER BY r.g2 DESC LIMIT $limit",
-            concept=concept, limit=limit, min_count=MIN_EDGE_COUNT,
+            concept=concept, limit=limit, min_count=min_count,
         )
         return [{"word": r["word"], "g2": r["g2"], "count": r["count"]} async for r in result]
 
 
-async def _reachable_with_depth(concept: str, max_depth: int = 3) -> dict[str, int]:
+async def _reachable_with_depth(concept: str, max_depth: int = 3, min_count: int = MIN_EDGE_COUNT) -> dict[str, int]:
     """Concepts reachable from `concept` within max_depth hops, traversing only
-    edges seen at least MIN_EDGE_COUNT times (so one-off co-occurrences don't
+    edges seen at least min_count times (so one-off co-occurrences don't
     create spurious 'convergence')."""
     driver = get_driver()
     async with driver.session() as session:
@@ -68,12 +68,12 @@ async def _reachable_with_depth(concept: str, max_depth: int = 3) -> dict[str, i
             "MATCH path = (a:Concept {word:$c1})-[:CO_OCCURS*1..%d]->(mid) "
             "WHERE ALL(rel IN relationships(path) WHERE rel.count >= $min_count) "
             "RETURN mid.word AS word, min(length(path)) AS depth" % max_depth,
-            c1=concept, min_count=MIN_EDGE_COUNT,
+            c1=concept, min_count=min_count,
         )
         return {r["word"]: r["depth"] async for r in result}
 
 
-async def infer_links(concept: str, limit: int = 5) -> list[dict]:
+async def infer_links(concept: str, limit: int = 5, min_count: int = MIN_EDGE_COUNT) -> list[dict]:
     """The reasoning step: derive 2-hop connections the graph never stored
     directly. If A->B and B->C are both real (count-floored) edges, C is
     surfaced here as a *derived* link of A — something the brain reasons its
@@ -83,10 +83,10 @@ async def infer_links(concept: str, limit: int = 5) -> list[dict]:
     candidate was reached through, only that it was reached at depth 2. That
     intermediate-tracking is a reasonable future enhancement, not required
     for this reasoning step to be useful."""
-    associations = await _top_associations(concept)
+    associations = await _top_associations(concept, min_count=min_count)
     direct = {a["word"] for a in associations}
 
-    reached = await _reachable_with_depth(concept, max_depth=2)
+    reached = await _reachable_with_depth(concept, max_depth=2, min_count=min_count)
     candidates = sorted(
         (word for word, depth in reached.items()
          if depth == 2 and word not in direct and word != concept),

@@ -46,6 +46,32 @@ async def test_infer_links_returns_empty_when_no_derived_candidates():
 
 
 @pytest.mark.asyncio
+async def test_infer_links_forwards_min_count_to_both_helpers():
+    """/ask needs to relax the edge-count floor to 1 for freshly-learned
+    concepts; infer_links must thread a passed min_count through to both
+    of its internal Cypher helpers (default behaviour for discover/converge
+    callers, who never pass min_count, must stay unchanged)."""
+    mock_top = AsyncMock(return_value=[])
+    mock_reach = AsyncMock(return_value={})
+    with patch.object(brain_service, "_top_associations", mock_top), \
+         patch.object(brain_service, "_reachable_with_depth", mock_reach):
+        await brain_service.infer_links("a", min_count=1)
+    mock_top.assert_awaited_once_with("a", min_count=1)
+    mock_reach.assert_awaited_once_with("a", max_depth=2, min_count=1)
+
+
+@pytest.mark.asyncio
+async def test_infer_links_default_min_count_matches_module_floor():
+    mock_top = AsyncMock(return_value=[])
+    mock_reach = AsyncMock(return_value={})
+    with patch.object(brain_service, "_top_associations", mock_top), \
+         patch.object(brain_service, "_reachable_with_depth", mock_reach):
+        await brain_service.infer_links("a")
+    mock_top.assert_awaited_once_with("a", min_count=brain_service.MIN_EDGE_COUNT)
+    mock_reach.assert_awaited_once_with("a", max_depth=2, min_count=brain_service.MIN_EDGE_COUNT)
+
+
+@pytest.mark.asyncio
 async def test_infer_links_result_shape():
     with patch.object(brain_service, "_top_associations", AsyncMock(return_value=[])), \
          patch.object(brain_service, "_reachable_with_depth", AsyncMock(return_value={"c": 2})):

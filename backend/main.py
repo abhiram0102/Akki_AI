@@ -3972,7 +3972,7 @@ async def brain_ask(
                     "new_concepts": learned["new_concepts"],
                     "new_edges": learned["new_edges"],
                 })}
-                assoc = await brain_service._top_associations(concept)
+                assoc = await brain_service._top_associations(concept, min_count=1)
             except Exception:
                 yield {"data": json.dumps({
                     "stage": "answer",
@@ -3983,7 +3983,7 @@ async def brain_ask(
                 })}
                 yield {"data": json.dumps({"stage": "done"})}
                 return
-        inferred = await brain_service.infer_links(concept)
+        inferred = await brain_service.infer_links(concept, min_count=1)
         yield {"data": json.dumps({
             "stage": "answer",
             "concept": concept,

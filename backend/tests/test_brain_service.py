@@ -111,6 +111,58 @@ class TestMultiOriginConvergence:
         assert "error" in result
 
 
+def _capturing_driver(records: list[dict] | None = None, captured: dict | None = None):
+    """A fake driver whose session.run() records the Cypher params it was
+    called with (into `captured`) and returns `records` as the result."""
+    if captured is None:
+        captured = {}
+    if records is None:
+        records = []
+    driver = MagicMock()
+
+    async def run(query, **params):
+        captured.update(params)
+        return _make_result(records)
+
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = session_cm
+    session_cm.__aexit__.return_value = False
+    session_cm.run = run
+    driver.session.return_value = session_cm
+    return driver
+
+
+class TestMinCountFloorIsParameterized:
+    """`/api/brain/ask` needs to answer freshly-learned concepts (which only
+    have count=1 edges) at a relaxed floor, while discover/converge keep the
+    strict default floor of 2 — so min_count must be a real parameter bound
+    into the Cypher, not the hardcoded MIN_EDGE_COUNT constant."""
+
+    async def test_top_associations_defaults_to_module_floor(self, monkeypatch):
+        captured: dict = {}
+        monkeypatch.setattr(brain_service, "get_driver", lambda: _capturing_driver(captured=captured))
+        await brain_service._top_associations("fire")
+        assert captured["min_count"] == brain_service.MIN_EDGE_COUNT
+
+    async def test_top_associations_forwards_explicit_min_count(self, monkeypatch):
+        captured: dict = {}
+        monkeypatch.setattr(brain_service, "get_driver", lambda: _capturing_driver(captured=captured))
+        await brain_service._top_associations("fire", min_count=1)
+        assert captured["min_count"] == 1
+
+    async def test_reachable_with_depth_defaults_to_module_floor(self, monkeypatch):
+        captured: dict = {}
+        monkeypatch.setattr(brain_service, "get_driver", lambda: _capturing_driver(captured=captured))
+        await brain_service._reachable_with_depth("fire")
+        assert captured["min_count"] == brain_service.MIN_EDGE_COUNT
+
+    async def test_reachable_with_depth_forwards_explicit_min_count(self, monkeypatch):
+        captured: dict = {}
+        monkeypatch.setattr(brain_service, "get_driver", lambda: _capturing_driver(captured=captured))
+        await brain_service._reachable_with_depth("fire", min_count=1)
+        assert captured["min_count"] == 1
+
+
 class TestGetStatus:
     async def test_reads_pg_stats_and_neo4j_counts(self, monkeypatch):
         # First call = concept count query, second call = edge count query
