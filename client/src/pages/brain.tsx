@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import BrainScene, { type BrainSceneEdge, type BrainSceneGraph, type BrainSceneHandle, type BrainSceneNode } from "@/brain3d/BrainScene";
+import { useAskStream } from "@/brain3d/useAskStream";
 
 // ── AKKI Brain — neural field ────────────────────────────────────────────────
 // The interface IS the mind: a dark bioluminescent field where concepts are
@@ -28,7 +30,7 @@ interface FieldNode {
 }
 interface FieldEdge { from: string; to: string; strength: number }
 
-type Mode = "associate" | "connect" | "converge";
+type Mode = "ask" | "associate" | "connect" | "converge";
 
 const COLORS = {
   void: "#070b16",
@@ -65,7 +67,7 @@ function ring(count: number, cx: number, cy: number, radius: number, phase = 0) 
 
 export default function BrainPage() {
   const [status, setStatus] = useState<BrainStatus | null>(null);
-  const [mode, setMode] = useState<Mode>("associate");
+  const [mode, setMode] = useState<Mode>("ask");
   const [concept, setConcept] = useState("");
   const [concept2, setConcept2] = useState("");
   const [seeds, setSeeds] = useState<string[]>([]);
@@ -76,6 +78,30 @@ export default function BrainPage() {
   const [loading, setLoading] = useState(false);
   const [reduced, setReduced] = useState(false);
   const runId = useRef(0);
+
+  // ── Ask mode (3D, SSE-driven) ──────────────────────────────────────────
+  const { ask, stage: askStage, answer: askAnswer, learnedNodes: askGrew, aborting: askAborting } = useAskStream();
+  const sceneRef = useRef<BrainSceneHandle>(null);
+  const [askGraphNodes, setAskGraphNodes] = useState<BrainSceneNode[]>([]);
+  const [askGraphEdges, setAskGraphEdges] = useState<BrainSceneEdge[]>([]);
+  const [askActivePath, setAskActivePath] = useState<string[]>([]);
+  // Bumped once per `runAsk()` call so grow-placeholder ids never collide
+  // across queries even though `askGraphNodes` (the hard-reset trigger) is
+  // itself only replaced once, at query start.
+  const askQueryIdRef = useRef(0);
+  const askGrowCountRef = useRef(0);
+  // The concept actually queried — captured at `ask()` time so a user
+  // editing the input mid-stream can't retroactively relabel placeholder
+  // nodes for the query already in flight.
+  const askQueriedConceptRef = useRef("");
+
+  const webglAvailable = useMemo(() => {
+    try {
+      return !!document.createElement("canvas").getContext("webgl2");
+    } catch {
+      return false;
+    }
+  }, []);
 
   useEffect(() => {
     try {
@@ -199,7 +225,112 @@ export default function BrainPage() {
     finally { if (id === runId.current) setLoading(false); }
   };
 
-  const run = () => (mode === "associate" ? runAssociate() : mode === "connect" ? runConnect() : runConverge());
+  const runAsk = () => {
+    const c = concept.trim();
+    if (!c) return;
+    setError(null);
+    askQueryIdRef.current += 1;
+    askGrowCountRef.current = 0;
+    askQueriedConceptRef.current = c;
+    // A genuinely new query → replace `graph.nodes` with a fresh array
+    // reference. Per BrainScene's contract (confirmed in the Task 8
+    // report), this is the hard-reset signal: it rebuilds the neuron
+    // buffers from scratch. Live growth for *this* query goes through the
+    // ref handle instead (see the askGrew/askAnswer effects below).
+    setAskGraphNodes([{ id: c, label: c, activation: 1 }]);
+    setAskGraphEdges([]);
+    setAskActivePath([]);
+    ask(c);
+  };
+
+  // `grew`: the backend only reports counts, not names, so spawn anonymous
+  // "growth" placeholder neurons near the queried concept's region — a
+  // visual "the brain is learning" cue, not named nodes (see useAskStream's
+  // header comment for why the shape is counts-only).
+  useEffect(() => {
+    if (!askGrew || askGrew.newConcepts <= 0) return;
+    const queryId = askQueryIdRef.current;
+    const label = askQueriedConceptRef.current || "concept";
+    const start = askGrowCountRef.current;
+    const placeholders: BrainSceneNode[] = Array.from({ length: askGrew.newConcepts }, (_, i) => ({
+      id: `grow-${queryId}-${start + i}`,
+      label,
+    }));
+    askGrowCountRef.current += askGrew.newConcepts;
+    sceneRef.current?.appendNodes(placeholders);
+  }, [askGrew]);
+
+  // `answer`: real, named nodes (associations + inferred derived links).
+  // Appended live via the ref (this query's `graph.nodes` was already
+  // planted at query start), and the answer subgraph becomes the new
+  // `activePath` so Signals flares/pulses it gold.
+  useEffect(() => {
+    if (!askAnswer) return;
+    const center = askAnswer.concept || askQueriedConceptRef.current;
+    const assoc = askAnswer.associations ?? [];
+    const inferred = askAnswer.inferred ?? [];
+    const maxG2 = Math.max(1, ...assoc.map((a) => a.g2 || 0));
+
+    const newNodes: BrainSceneNode[] = [
+      ...assoc.map((a) => ({ id: a.word, label: a.word, activation: Math.min(1, (a.g2 || 0) / maxG2) })),
+      ...inferred.map((i) => ({ id: i.concept, label: i.concept, activation: Math.min(1, Math.max(0, i.strength || 0)) })),
+    ];
+
+    const newEdges: BrainSceneEdge[] = [];
+    const seenEdgeIds = new Set<string>();
+    const addEdge = (from: string, to: string) => {
+      const id = `${from}->${to}`;
+      if (seenEdgeIds.has(id) || from === to) return;
+      seenEdgeIds.add(id);
+      newEdges.push({ id, from, to });
+    };
+    assoc.forEach((a) => addEdge(center, a.word));
+    inferred.forEach((i) => {
+      if (i.via && i.via !== center) {
+        addEdge(center, i.via);
+        addEdge(i.via, i.concept);
+      } else {
+        addEdge(center, i.concept);
+      }
+    });
+
+    if (newNodes.length > 0) sceneRef.current?.appendNodes(newNodes);
+    // Dim the center back down when the concept couldn't be learned (empty
+    // answer + note), keep it fully flared on a real answer.
+    sceneRef.current?.updateActivations({ [center]: askAnswer.note ? 0.3 : 1 });
+
+    setAskGraphEdges(newEdges);
+    setAskActivePath(newEdges.map((e) => e.id));
+  }, [askAnswer]);
+
+  const askGraph = useMemo<BrainSceneGraph>(
+    () => ({ nodes: askGraphNodes, edges: askGraphEdges, activePath: askActivePath }),
+    [askGraphNodes, askGraphEdges, askActivePath]
+  );
+
+  const askStatusText = useMemo(() => {
+    switch (askStage) {
+      case "thinking": return "thinking…";
+      case "gap": return "hasn't learned this yet — reading Wikipedia…";
+      case "learning": return "reading Wikipedia…";
+      case "grew": return askGrew ? `learned ${askGrew.newConcepts} new concepts, ${askGrew.newEdges} new connections` : "growing…";
+      case "answer":
+      case "done":
+        if (askAborting) return "";
+        if (askAnswer?.note) return askAnswer.note;
+        if (askAnswer) return `${askAnswer.associations.length} associations, ${askAnswer.inferred.length} inferred links`;
+        return "";
+      case "error": return "The field went quiet — check your connection.";
+      default: return "";
+    }
+  }, [askStage, askGrew, askAnswer, askAborting]);
+
+  const run = () => (
+    mode === "ask" ? runAsk()
+    : mode === "associate" ? runAssociate()
+    : mode === "connect" ? runConnect()
+    : runConverge()
+  );
 
   const nodeById = useMemo(() => {
     const m: Record<string, FieldNode> = {};
@@ -213,9 +344,6 @@ export default function BrainPage() {
     setSeedDraft("");
   };
 
-  const kindColor = (k: NodeKind) =>
-    k === "truth" ? COLORS.truth : k === "seed" ? COLORS.origin : k === "center" ? COLORS.pulse : COLORS.synapse;
-
   return (
     <div style={{ position: "relative", width: "100%", height: "100vh", overflow: "hidden", background: COLORS.void, fontFamily: FONT }}>
       <style>{`
@@ -227,6 +355,7 @@ export default function BrainPage() {
         .akki-node { animation: akkiSpawn .5s cubic-bezier(.2,.9,.3,1) both; }
         .akki-drift { animation: akkiDrift var(--dur) ease-in-out infinite; }
         @media (prefers-reduced-motion: reduce) { .akki-drift{ animation:none } .akki-edge{ animation:none !important } }
+        .akki-brain-scene { position: absolute; inset: 0; z-index: 1; }
       `}</style>
 
       {/* radial depth wash */}
@@ -250,7 +379,106 @@ export default function BrainPage() {
         )}
       </div>
 
-      {/* the field */}
+      {/* the field: live 3D scene in Ask mode when WebGL is available, else the 2D fallback */}
+      {mode === "ask" && webglAvailable ? (
+        <BrainScene ref={sceneRef} graph={askGraph} className="akki-brain-scene" />
+      ) : (
+        <BrainFieldFallback nodes={nodes} edges={edges} reduced={reduced} loading={loading} error={error} nodeById={nodeById} />
+      )}
+
+      {/* floating glass query bar */}
+      <div style={{ position: "absolute", left: "50%", bottom: 28, transform: "translateX(-50%)", zIndex: 4,
+        width: "min(680px, calc(100% - 32px))", background: "rgba(13,21,38,.72)", backdropFilter: "blur(14px)",
+        border: `1px solid rgba(124,108,255,.28)`, borderRadius: 18, padding: 14,
+        boxShadow: "0 20px 60px rgba(0,0,0,.5)" }}>
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          {([["ask", "Ask"], ["associate", "Associations"], ["connect", "Connect two"], ["converge", "Convergence"]] as [Mode, string][]).map(([m, label]) => (
+            <button key={m} onClick={() => { setMode(m); setError(null); }}
+              style={{ flex: 1, padding: "7px 0", fontFamily: FONT, fontSize: 12.5, fontWeight: 600, borderRadius: 10, cursor: "pointer",
+                border: mode === m ? `1px solid ${COLORS.origin}` : "1px solid transparent",
+                background: mode === m ? "rgba(124,108,255,.18)" : "transparent",
+                color: mode === m ? COLORS.ink : COLORS.mist, transition: "all .15s" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {mode === "converge" ? (
+          <div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: seeds.length ? 10 : 0 }}>
+              {seeds.map((s) => (
+                <span key={s} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(124,108,255,.16)",
+                  border: `1px solid rgba(124,108,255,.4)`, color: COLORS.ink, borderRadius: 20, padding: "4px 10px", fontSize: 12.5 }}>
+                  {s}
+                  <button onClick={() => setSeeds(seeds.filter((x) => x !== s))} aria-label={`remove ${s}`}
+                    style={{ background: "none", border: "none", color: COLORS.mist, cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
+                </span>
+              ))}
+            </div>
+            <FieldRow>
+              <input value={seedDraft} onChange={(e) => setSeedDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addSeed(); } }}
+                placeholder="add an origin concept, e.g. fire — then Enter"
+                style={inputStyle} />
+              <button onClick={addSeed} style={ghostBtn}>Add</button>
+              <button onClick={run} disabled={loading || seeds.length < 2} style={primaryBtn(loading || seeds.length < 2)}>Find convergence</button>
+            </FieldRow>
+          </div>
+        ) : mode === "connect" ? (
+          <FieldRow>
+            <input value={concept} onChange={(e) => setConcept(e.target.value)} placeholder="first concept" style={inputStyle} />
+            <input value={concept2} onChange={(e) => setConcept2(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && run()} placeholder="second concept" style={inputStyle} />
+            <button onClick={run} disabled={loading || !concept.trim() || !concept2.trim()} style={primaryBtn(loading || !concept.trim() || !concept2.trim())}>Connect</button>
+          </FieldRow>
+        ) : mode === "ask" ? (
+          <div>
+            <FieldRow>
+              <input value={concept} onChange={(e) => setConcept(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && run()} placeholder="ask the brain about a concept…" style={inputStyle} autoFocus />
+              <button onClick={run} disabled={askStage === "thinking" || askStage === "gap" || askStage === "learning" || !concept.trim()}
+                style={primaryBtn(askStage === "thinking" || askStage === "gap" || askStage === "learning" || !concept.trim())}>
+                Ask
+              </button>
+            </FieldRow>
+            {askStatusText && (
+              <div style={{ marginTop: 10, fontSize: 12.5, color: askAnswer?.note ? COLORS.pulse : COLORS.synapse }}>
+                {askStatusText}
+              </div>
+            )}
+          </div>
+        ) : (
+          <FieldRow>
+            <input value={concept} onChange={(e) => setConcept(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && run()} placeholder="ask the brain about a concept…" style={inputStyle} autoFocus />
+            <button onClick={run} disabled={loading || !concept.trim()} style={primaryBtn(loading || !concept.trim())}>Discover</button>
+          </FieldRow>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── 2D field fallback ────────────────────────────────────────────────────────
+// The original SVG+HTML "neural field" renderer, lifted out unchanged so it
+// can be reused whenever WebGL is unavailable, or for the three non-Ask
+// modes (Associations / Connect two / Convergence), which still drive this
+// 2D visualization rather than the 3D scene.
+function BrainFieldFallback({
+  nodes, edges, reduced, loading, error, nodeById,
+}: {
+  nodes: FieldNode[];
+  edges: FieldEdge[];
+  reduced: boolean;
+  loading: boolean;
+  error: string | null;
+  nodeById: Record<string, FieldNode>;
+}) {
+  const kindColor = (k: NodeKind) =>
+    k === "truth" ? COLORS.truth : k === "seed" ? COLORS.origin : k === "center" ? COLORS.pulse : COLORS.synapse;
+
+  return (
+    <>
       <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", zIndex: 1 }}>
         <defs>
           <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
@@ -319,61 +547,7 @@ export default function BrainPage() {
           </div>
         )}
       </div>
-
-      {/* floating glass query bar */}
-      <div style={{ position: "absolute", left: "50%", bottom: 28, transform: "translateX(-50%)", zIndex: 4,
-        width: "min(680px, calc(100% - 32px))", background: "rgba(13,21,38,.72)", backdropFilter: "blur(14px)",
-        border: `1px solid rgba(124,108,255,.28)`, borderRadius: 18, padding: 14,
-        boxShadow: "0 20px 60px rgba(0,0,0,.5)" }}>
-        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-          {([["associate", "Associations"], ["connect", "Connect two"], ["converge", "Convergence"]] as [Mode, string][]).map(([m, label]) => (
-            <button key={m} onClick={() => { setMode(m); setError(null); }}
-              style={{ flex: 1, padding: "7px 0", fontFamily: FONT, fontSize: 12.5, fontWeight: 600, borderRadius: 10, cursor: "pointer",
-                border: mode === m ? `1px solid ${COLORS.origin}` : "1px solid transparent",
-                background: mode === m ? "rgba(124,108,255,.18)" : "transparent",
-                color: mode === m ? COLORS.ink : COLORS.mist, transition: "all .15s" }}>
-              {label}
-            </button>
-          ))}
-        </div>
-
-        {mode === "converge" ? (
-          <div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: seeds.length ? 10 : 0 }}>
-              {seeds.map((s) => (
-                <span key={s} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(124,108,255,.16)",
-                  border: `1px solid rgba(124,108,255,.4)`, color: COLORS.ink, borderRadius: 20, padding: "4px 10px", fontSize: 12.5 }}>
-                  {s}
-                  <button onClick={() => setSeeds(seeds.filter((x) => x !== s))} aria-label={`remove ${s}`}
-                    style={{ background: "none", border: "none", color: COLORS.mist, cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
-                </span>
-              ))}
-            </div>
-            <FieldRow>
-              <input value={seedDraft} onChange={(e) => setSeedDraft(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addSeed(); } }}
-                placeholder="add an origin concept, e.g. fire — then Enter"
-                style={inputStyle} />
-              <button onClick={addSeed} style={ghostBtn}>Add</button>
-              <button onClick={run} disabled={loading || seeds.length < 2} style={primaryBtn(loading || seeds.length < 2)}>Find convergence</button>
-            </FieldRow>
-          </div>
-        ) : mode === "connect" ? (
-          <FieldRow>
-            <input value={concept} onChange={(e) => setConcept(e.target.value)} placeholder="first concept" style={inputStyle} />
-            <input value={concept2} onChange={(e) => setConcept2(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && run()} placeholder="second concept" style={inputStyle} />
-            <button onClick={run} disabled={loading || !concept.trim() || !concept2.trim()} style={primaryBtn(loading || !concept.trim() || !concept2.trim())}>Connect</button>
-          </FieldRow>
-        ) : (
-          <FieldRow>
-            <input value={concept} onChange={(e) => setConcept(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && run()} placeholder="ask the brain about a concept…" style={inputStyle} autoFocus />
-            <button onClick={run} disabled={loading || !concept.trim()} style={primaryBtn(loading || !concept.trim())}>Discover</button>
-          </FieldRow>
-        )}
-      </div>
-    </div>
+    </>
   );
 }
 

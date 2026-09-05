@@ -1,0 +1,278 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+
+// ── Ask-mode SSE client ──────────────────────────────────────────────────────
+// Drives `POST /api/brain/ask`, which streams Server-Sent Events in the wire
+// format `sse_starlette.EventSourceResponse` emits: `data: <json>\n\n` per
+// event, no `event:` field. The exact stage payloads, in order, are:
+//
+//   1. {stage:"thinking", concept}
+//   2. {stage:"gap", concept}                         — only if unknown concept
+//   3. {stage:"learning", source}                      — only if gap
+//   4. {stage:"grew", new_concepts, new_edges}          — only if gap, learn succeeded
+//   5. {stage:"answer", concept, associations:[], inferred:[], note}  — either
+//      the normal-path answer, or (if gap + learn failed) an empty answer
+//      carrying a "couldn't learn that one" note, followed immediately by done
+//   6. {stage:"done"}
+//
+// So a client sees one of three shapes: thinking→answer→done (known concept),
+// thinking→gap→learning→grew→answer→done (learned successfully), or
+// thinking→gap→learning→answer(empty+note)→done (learn failed).
+//
+// Design choices (documented per the task brief's latitude grant):
+//
+//  - `learnedNodes` carries the `grew` event's counts (`newConcepts`/
+//    `newEdges`), NOT synthesized graph nodes. The backend's `grew` payload
+//    only ever reports counts — it does not name the newly-learned concepts
+//    — so there is nothing for this generic, DOM/3D-agnostic hook to turn
+//    into real `{id, label}` nodes. The consumer (`brain.tsx`) is expected to
+//    use these counts to spawn anonymous "growth" placeholder neurons (a
+//    visual "the brain is growing" cue), and separately use the `answer`
+//    event's `associations`/`inferred` (which DO carry real concept names)
+//    to append real, named nodes and flare the answer path gold. Keeping
+//    that translation in `brain.tsx` (rather than here) keeps this hook free
+//    of any `BrainScene`/Three.js coupling, so it stays trivially unit
+//    testable in plain Node (see `useAskStream.test.ts`).
+//  - `stage` is a plain string enum, not an object carrying per-stage
+//    payload data (e.g. no `concept` on the "thinking" stage) — the queried
+//    concept is already known to the caller (it's what was passed to
+//    `ask()`), and every other per-stage detail the UI plausibly wants is
+//    already exposed via `answer` (concept/associations/inferred/note) or
+//    `learnedNodes` (counts). This keeps the returned shape close to the
+//    brief's own sketch (`{ask, stage, answer, learnedNodes, aborting}`)
+//    rather than inventing a richer, harder-to-consume shape.
+//  - `aborting` is best-effort UI signal, true from the moment a newer
+//    `ask()` call (or unmount) cancels an in-flight stream until that
+//    specific stream's own cleanup has run. In practice, because `ask()`
+//    resets `stage`/`answer`/`learnedNodes` synchronously for the *new*
+//    query before the old stream's abort is even observed, a stale event
+//    from the old stream can never overwrite the new query's state — but
+//    exposing `aborting` still lets a caller suppress a mid-transition flash
+//    (e.g. skip animating in a "couldn't learn" note that's about to be
+//    replaced) if it wants to.
+
+/** Reuses the exact auth pattern already established in client/src/pages/brain.tsx. */
+function authHeaders(): Record<string, string> {
+  try {
+    const token = localStorage.getItem("auth_token");
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
+/** One parsed SSE `data:` JSON payload. Shape is stage-dependent — see file header. */
+export type SSEEvent = Record<string, unknown>;
+
+export interface SSEChunkParser {
+  /** Feed one chunk of raw response text; returns any newly-completed events. */
+  push(chunk: string): SSEEvent[];
+}
+
+/**
+ * Creates a stateful parser for `data: <json>\n\n`-delimited SSE text.
+ * Buffers partial input across `push()` calls so a chunk boundary landing
+ * mid-JSON (or mid-`\n\n` separator) never drops or corrupts an event.
+ * Malformed `data:` lines are skipped rather than thrown, so one bad line
+ * can't kill the whole stream.
+ */
+export function parseSSEChunks(): SSEChunkParser {
+  let buffer = "";
+  return {
+    push(chunk: string): SSEEvent[] {
+      buffer += chunk;
+      const events: SSEEvent[] = [];
+      let sepIndex: number;
+      // A complete event is terminated by a blank line ("\n\n"). Consume
+      // every complete block found so far; whatever's left (no trailing
+      // "\n\n" yet) stays buffered for the next push().
+      while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
+        const block = buffer.slice(0, sepIndex);
+        buffer = buffer.slice(sepIndex + 2);
+        for (const line of block.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const jsonText = line.slice("data:".length).trim();
+          if (!jsonText) continue;
+          try {
+            events.push(JSON.parse(jsonText) as SSEEvent);
+          } catch {
+            // Ignore a malformed line rather than throwing.
+          }
+        }
+      }
+      return events;
+    },
+  };
+}
+
+export type AskStage =
+  | "idle"
+  | "thinking"
+  | "gap"
+  | "learning"
+  | "grew"
+  | "answer"
+  | "done"
+  | "error";
+
+export interface AskAssociation {
+  word: string;
+  g2: number;
+  count: number;
+}
+
+export interface AskInferred {
+  concept: string;
+  via: string | null;
+  strength: number;
+  derived: true;
+}
+
+export interface AskAnswer {
+  concept: string;
+  associations: AskAssociation[];
+  inferred: AskInferred[];
+  note?: string;
+}
+
+/** Counts from a `grew` event — see the "learnedNodes" design note above. */
+export interface AskGrew {
+  newConcepts: number;
+  newEdges: number;
+}
+
+export interface UseAskStreamResult {
+  ask(concept: string): void;
+  stage: AskStage;
+  answer: AskAnswer | null;
+  learnedNodes: AskGrew | null;
+  aborting: boolean;
+}
+
+export function useAskStream(): UseAskStreamResult {
+  const [stage, setStage] = useState<AskStage>("idle");
+  const [answer, setAnswer] = useState<AskAnswer | null>(null);
+  const [learnedNodes, setLearnedNodes] = useState<AskGrew | null>(null);
+  const [aborting, setAborting] = useState(false);
+
+  const controllerRef = useRef<AbortController | null>(null);
+  const isMountedRef = useRef(true);
+  const pendingAbortsRef = useRef(0);
+
+  const markAbortStart = useCallback(() => {
+    pendingAbortsRef.current += 1;
+    if (isMountedRef.current) setAborting(true);
+  }, []);
+
+  const markAbortSettled = useCallback(() => {
+    pendingAbortsRef.current = Math.max(0, pendingAbortsRef.current - 1);
+    if (isMountedRef.current) setAborting(pendingAbortsRef.current > 0);
+  }, []);
+
+  /** Aborts whatever request is currently in flight, if any. */
+  const abortInFlight = useCallback(() => {
+    const prev = controllerRef.current;
+    if (!prev) return;
+    controllerRef.current = null;
+    markAbortStart();
+    prev.abort();
+  }, [markAbortStart]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      abortInFlight();
+    };
+  }, [abortInFlight]);
+
+  const ask = useCallback(
+    (rawConcept: string) => {
+      const concept = rawConcept.trim();
+      if (!concept) return;
+
+      // Cancel any previous in-flight stream before starting a new one.
+      abortInFlight();
+
+      const controller = new AbortController();
+      controllerRef.current = controller;
+
+      setStage("thinking");
+      setAnswer(null);
+      setLearnedNodes(null);
+
+      (async () => {
+        let ownAbortSeen = false;
+        try {
+          const res = await fetch("/api/brain/ask", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({ concept }),
+            signal: controller.signal,
+          });
+
+          if (!res.ok || !res.body) {
+            if (!controller.signal.aborted && isMountedRef.current) setStage("error");
+            return;
+          }
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          const parser = parseSSEChunks();
+
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            const events = parser.push(decoder.decode(value, { stream: true }));
+            for (const evt of events) {
+              if (controllerRef.current !== controller || !isMountedRef.current) continue;
+              applyEvent(evt, concept);
+            }
+          }
+        } catch {
+          if (controller.signal.aborted) {
+            ownAbortSeen = true;
+          } else if (isMountedRef.current) {
+            setStage("error");
+          }
+        } finally {
+          if (ownAbortSeen) {
+            markAbortSettled();
+          } else if (controllerRef.current === controller) {
+            // This request finished on its own (not superseded/aborted) —
+            // release the slot so a later ask() doesn't try to abort a
+            // dead controller.
+            controllerRef.current = null;
+          }
+        }
+      })();
+
+      function applyEvent(evt: SSEEvent, queriedConcept: string) {
+        const s = evt.stage;
+        if (s === "thinking" || s === "gap" || s === "learning") {
+          setStage(s);
+        } else if (s === "grew") {
+          setStage("grew");
+          setLearnedNodes({
+            newConcepts: Number(evt.new_concepts ?? 0),
+            newEdges: Number(evt.new_edges ?? 0),
+          });
+        } else if (s === "answer") {
+          setStage("answer");
+          setAnswer({
+            concept: typeof evt.concept === "string" ? evt.concept : queriedConcept,
+            associations: Array.isArray(evt.associations) ? (evt.associations as AskAssociation[]) : [],
+            inferred: Array.isArray(evt.inferred) ? (evt.inferred as AskInferred[]) : [],
+            note: typeof evt.note === "string" ? evt.note : undefined,
+          });
+        } else if (s === "done") {
+          setStage("done");
+        } else if (s === "error") {
+          setStage("error");
+        }
+      }
+    },
+    [abortInFlight, markAbortSettled]
+  );
+
+  return { ask, stage, answer, learnedNodes, aborting };
+}
