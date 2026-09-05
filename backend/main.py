@@ -4030,7 +4030,7 @@ async def brain_ask(
             try:
                 async with httpx.AsyncClient(timeout=15, headers=brain_learn.UA_HEADERS) as client:
                     queued = await brain_curiosity.queue_reading(
-                        curious_about, client, brain_learn.resolve_wikipedia_title,
+                        curious_about, client, brain_learn.resolve_source,
                     )
                 if queued:
                     yield {"data": json.dumps({

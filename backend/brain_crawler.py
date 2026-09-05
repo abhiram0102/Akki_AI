@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 from collections import Counter
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 
 import httpx
@@ -22,53 +23,29 @@ from backend.models import BrainFrontier, BrainVisitedPage, BrainDeadLetter, Bra
 from backend.services import brain_learn
 from backend.services.neo4j_service import get_driver, ensure_schema
 from backend.services.brain_fetchers import (
-    RobotsChecker, RateLimiter, fetch_wikipedia, fetch_arxiv,
-    fetch_generic_article,
+    RobotsChecker, RateLimiter, fetch_structure,
 )
 from backend.services.brain_nlp import extract_dependencies
 
 logger = logging.getLogger("akki.brain_crawler")
 
-# Knowledge sources only. News was removed deliberately: it flooded the graph
-# with cookie/DMCA/marketing boilerplate and starved the real knowledge (the
-# crawl went 4753 news : 5 wiki pages). Wikipedia articles state clean causal
-# and relational sentences, which is what the extractor needs. A broad, diverse
-# seed set across domains so the graph doesn't collapse into one region.
-SEEDS = [
-    ("https://en.wikipedia.org/wiki/Fire", "fire", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Energy", "energy", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Evolution", "evolution", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Consciousness", "consciousness", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Mathematics", "mathematics", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Computer_security", "computer security", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Cryptography", "cryptography", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Machine_learning", "machine learning", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Immune_system", "immune system", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Climate_change", "climate change", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Economics", "economics", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Electricity", "electricity", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Photosynthesis", "photosynthesis", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Neuron", "neuron", "wikipedia"),
-    ("https://en.wikipedia.org/wiki/Vaccine", "vaccine", "wikipedia"),
-]
+# A SINGLE starting signal, not a curated seed list.
+#
+# This was fifteen hardcoded Wikipedia URLs, each with a hand-written concept
+# name and a source type. That is exactly the hardcoded seeding the project's
+# constraint forbids: it decides in advance what the brain is allowed to know
+# about and which site it must learn it from.
+#
+# The brain now starts from one address and finds everything else by following
+# what the documents themselves point at, with structure discovered per page.
+# Point it anywhere; the crawl is no longer tied to one site's conventions.
+BRAIN_START_URL = os.getenv(
+    "BRAIN_START_URL", "https://en.wikipedia.org/wiki/Knowledge"
+)
 
 MAX_ATTEMPTS = 3
 PRUNE_EVERY_N_PAGES = 200
 BATCH_SIZE = 20
-
-# Map source_type -> fetcher *name*, resolved dynamically via globals() at
-# call time (rather than capturing function objects directly at import time)
-# so that tests can patch module-level names (e.g. patch.object(brain_crawler,
-# "fetch_wikipedia", ...)) and have crawl_one_page actually pick up the mock.
-_FETCHER_NAMES = {"wikipedia": "fetch_wikipedia", "arxiv": "fetch_arxiv", "news": "fetch_generic_article"}
-_running = True
-
-
-def _signal_handler(sig, frame):
-    global _running
-    logger.info("Signal %s received — finishing current page, then stopping.", sig)
-    _running = False
-
 
 async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: RateLimiter,
                           neo4j_driver, pg_session) -> int | None:
@@ -86,17 +63,23 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
 
     await limiter.wait(url)
 
-    fetcher_name = _FETCHER_NAMES.get(source_type, "fetch_generic_article")
-    fetcher = globals()[fetcher_name]
+    # One fetcher for every source. There is no source_type dispatch any more
+    # because there is nothing site-specific left to dispatch to: structure is
+    # discovered per document. `source_type` survives only as a label recording
+    # where a frontier entry came from.
     try:
-        text, links = await fetcher(url, client)
+        structure = await fetch_structure(url, client)
     except Exception as e:
         logger.warning("Fetch failed for %s: %s", url, e)
         return None
+    sentences = structure["sentences"]
+    links = structure["links"]
 
-    # Minimum 3 words: the grammatical floor for extract_dependencies to find
-    # a subject-verb-object triple (e.g. "Fire causes heat" == 3 words).
-    sentences = [s for s in text.split(". ") if len(s.split()) >= 3]
+    # Sentences arrive already split at boundaries discovered from this
+    # document, rather than cut on a hardcoded ". ". Minimum 3 words is the
+    # grammatical floor for extract_dependencies to find a subject-verb-object
+    # triple ("Fire causes heat" is exactly 3).
+    sentences = [s for s in sentences if len(s.split()) >= 3]
     pairs: list[tuple[str, str]] = []
     for sentence in sentences[:200]:  # cap per-page NLP cost
         try:
@@ -122,8 +105,14 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
     )
     await pg_session.execute(delete(BrainFrontier).where(BrainFrontier.url == url))
 
+    # A frontier entry's `concept` is a label for logging and for grouping, not
+    # knowledge. Deriving it used to assume a site's URL convention (last path
+    # segment, underscores as spaces) — Wikipedia's convention, applied to
+    # every site. It now carries the referring page's concept instead, which
+    # assumes nothing about how any site builds its addresses. What the page is
+    # actually about is decided by reading it.
     new_links = [
-        {"url": link, "concept": link.rsplit("/", 1)[-1].replace("_", " "), "source_type": source_type}
+        {"url": link, "concept": concept, "source_type": source_type}
         for link in links
     ]
     if new_links:
@@ -193,14 +182,15 @@ async def main() -> None:
             # Seed the frontier if empty
             result = await pg_session.execute(select(BrainFrontier).limit(1))
             if result.scalar_one_or_none() is None:
-                # Knowledge seeds only — no news RSS bootstrap (it flooded the
-                # frontier and drowned the knowledge sources).
-                for url, concept, source_type in SEEDS:
-                    await pg_session.execute(
-                        pg_insert(BrainFrontier).values(
-                            url=url, concept=concept, source_type=source_type,
-                        ).on_conflict_do_nothing()
-                    )
+                # One address in. Everything else is discovered by following
+                # what the documents point at.
+                await pg_session.execute(
+                    pg_insert(BrainFrontier).values(
+                        url=BRAIN_START_URL,
+                        concept=urlparse(BRAIN_START_URL).path.rsplit("/", 1)[-1] or "start",
+                        source_type="discovered",
+                    ).on_conflict_do_nothing()
+                )
                 await pg_session.commit()
 
             logger.info("Brain crawler starting.")

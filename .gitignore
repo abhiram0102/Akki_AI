@@ -6,3 +6,6 @@ vite.config.ts.*
 *.tar.gz
 node_modules
 .worktrees/
+
+# Local meaning store (ChromaDB): derived data, rebuilt by reading.
+data/brain_meaning/

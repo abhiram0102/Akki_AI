@@ -39,8 +39,15 @@ class TestCrawlOnePage:
         neo4j_driver = _fake_neo4j_driver()
         pg_session = _fake_pg_session()
 
-        with patch.object(brain_crawler, "fetch_wikipedia", AsyncMock(
-            return_value=("Fire causes heat. Heat leads to energy.", ["https://en.wikipedia.org/wiki/Heat"])
+        # One fetcher for every source now, returning already-discovered
+        # structure rather than raw text the caller has to re-split.
+        with patch.object(brain_crawler, "fetch_structure", AsyncMock(
+            return_value={
+                "text": "Fire causes heat. Heat leads to energy.",
+                "sentences": ["Fire causes heat.", "Heat leads to energy."],
+                "links": ["https://en.wikipedia.org/wiki/Heat"],
+                "delimiters": ("<", ">"), "terminators": ["."],
+            }
         )):
             result = await brain_crawler.crawl_one_page(
                 entry, client=AsyncMock(),
@@ -69,7 +76,7 @@ class TestCrawlOnePage:
 
     async def test_fetch_failure_returns_none_without_raising(self):
         entry = {"url": "https://en.wikipedia.org/wiki/Broken", "concept": "broken", "source_type": "wikipedia"}
-        with patch.object(brain_crawler, "fetch_wikipedia", AsyncMock(side_effect=Exception("timeout"))):
+        with patch.object(brain_crawler, "fetch_structure", AsyncMock(side_effect=Exception("timeout"))):
             result = await brain_crawler.crawl_one_page(
                 entry, client=AsyncMock(),
                 robots=AsyncMock(allowed=AsyncMock(return_value=True)),

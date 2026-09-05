@@ -21,7 +21,9 @@ the content is its own: it read the sources, it derived the links. A narrator
 model could later rephrase `summary` without being allowed to add a fact, and
 nothing in this module would need to change.
 """
-from backend.services import brain_query, brain_service
+from starlette.concurrency import run_in_threadpool
+
+from backend.services import brain_meaning, brain_query, brain_service
 
 # Evidence thresholds for describing how sure the brain is. Deterministic, so
 # the same graph state always produces the same wording.
@@ -225,12 +227,35 @@ async def build(plan, min_count: int = brain_service.MIN_EDGE_COUNT,
             # correct answer, so a traversal failure must not lose the rest.
             sections["convergences"] = []
 
+    # Function 7 step 3: which meaning of the concept is being asked about.
+    # Embedding and clustering are CPU-bound, so they run off the event loop.
+    # A concept with a single known sense returns None and the answer simply
+    # does not mention senses, rather than asserting a distinction that is not
+    # there.
+    sense = None
+    if primary:
+        try:
+            sense = await run_in_threadpool(
+                brain_meaning.disambiguate, primary, plan.raw
+            )
+        except Exception:
+            sense = None
+
     evidence = sections["dependsOn"] + sections["produces"]
     confidence = _confidence(evidence)
 
     # The unprompted observation: something relevant the user did not ask for.
     observation = None
-    if sections["convergences"] and plan.intent in (
+    if sense:
+        # Saying which sense it settled on is more useful than any other
+        # remark, because it tells the reader what the rest of the answer is
+        # about — and a concept with two meanings is exactly where a confident
+        # answer about the wrong one would mislead.
+        observation = (
+            f"You seem to mean {primary} in the sense of "
+            f"{_join(sense.get('label') or [])}. I know it used other ways too."
+        )
+    elif sections["convergences"] and plan.intent in (
             brain_query.DEFINE, brain_query.CAUSE, brain_query.EFFECT):
         # A concept reached from several independent branches is stronger
         # evidence of a hidden dependency than any single 2-hop link, so it
@@ -262,5 +287,6 @@ async def build(plan, min_count: int = brain_service.MIN_EDGE_COUNT,
         "observation": observation,
         "gap": _gap(sections, plan, confidence),
         "confidence": confidence,
+        "sense": sense,
         "provenance": sources or [],
     }

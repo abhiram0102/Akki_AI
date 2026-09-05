@@ -35,8 +35,9 @@ class TestCrawlerUsesLearnEngine:
         # this test only needs to verify crawl_one_page wires the resulting
         # Counters into apply_to_graph, so we don't want it flaking on
         # whatever NLP model happens to be installed in a given environment.
-        with patch.object(brain_crawler, "fetch_wikipedia", AsyncMock(
-            return_value=("Fire causes heat.", [])
+        with patch.object(brain_crawler, "fetch_structure", AsyncMock(
+            return_value={"text": "Fire causes heat.", "sentences": ["Fire causes heat."],
+                          "links": [], "delimiters": ("<", ">"), "terminators": ["."]}
         )), patch.object(brain_crawler, "extract_dependencies", MagicMock(
             return_value=[("fire", "heat")]
         )), patch.object(brain_learn, "apply_to_graph", AsyncMock(

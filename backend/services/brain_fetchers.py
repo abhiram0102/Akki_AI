@@ -1,16 +1,26 @@
-"""Source fetchers for the Brain Engine crawler.
+"""Fetching for the Brain Engine crawler.
 
-Each fetcher returns (text, discovered_links). All network access goes
-through the shared RobotsChecker and RateLimiter — no fetcher bypasses
-either.
+One fetcher, for every source. All network access goes through the shared
+RobotsChecker and RateLimiter — nothing bypasses either.
+
+This file used to hold a fetcher per site: Wikipedia keyed to `#mw-content-text`
+and a `/wiki/` link prefix, arXiv keyed to `blockquote.abstract` and `/abs/`,
+and a generic one keyed to HTML's `<p>` element with a fixed list of elements
+to strip. It also split sentences on `.!?`. Every one of those encoded
+knowledge of a format, which the project's defining constraint forbids, and
+every one of them meant a new site needed new code.
+
+They are replaced by `fetch`, which hands the raw response to
+`brain_discovery` and lets the structure be worked out from the bytes. The
+result is that an unfamiliar site needs no code at all, and the HTML parser
+is gone from the path entirely.
 """
 import asyncio
-import re
 import time
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
-from bs4 import BeautifulSoup
+from backend.services import brain_discovery
 
 
 class RobotsChecker:
@@ -53,91 +63,27 @@ class RateLimiter:
         self._last_request[domain] = time.monotonic()
 
 
-def _extract_sentences(text: str) -> list[str]:
-    parts = re.split(r'(?<=[.!?])\s+', text)
-    return [s.strip() for s in parts if 5 <= len(s.split()) <= 40]
+async def fetch(url: str, client) -> tuple[str, list[str]]:
+    """Fetch any document and return its prose and the references it offers.
 
-
-async def fetch_wikipedia(url: str, client) -> tuple[str, list[str]]:
-    """Fetch a Wikipedia article: main text + in-article links."""
+    Nothing here knows what kind of document it is about to receive. The
+    response body goes to `brain_discovery`, which works out this document's
+    markup delimiters, sentence boundaries and references from the bytes
+    themselves, so the same call handles an encyclopedia article, a paper
+    abstract, or a format nobody has seen before.
+    """
     resp = await client.get(url)
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    body = soup.select_one("#mw-content-text") or soup
-    paras = body.select("p")
-    text = " ".join(p.get_text() for p in paras)
-    text = re.sub(r'\[\d+\]', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    links: list[str] = []
-    seen: set[str] = set()
-    for a in body.select("a[href]"):
-        href = a.get("href", "")
-        if href.startswith("https://en.wikipedia.org/wiki/"):
-            full = href
-        elif href.startswith("/wiki/"):
-            full = "https://en.wikipedia.org" + href
-        else:
-            continue
-        path = full.replace("https://en.wikipedia.org/wiki/", "")
-        if ":" in path or "#" in path:
-            continue
-        if full not in seen:
-            seen.add(full)
-            links.append(full)
-
-    return text, links[:50]
+    structure = brain_discovery.discover_structure(resp.text, url)
+    return structure["text"], structure["links"]
 
 
-async def fetch_arxiv(url: str, client) -> tuple[str, list[str]]:
-    """Fetch an arXiv abstract page: abstract text + linked paper IDs."""
+async def fetch_structure(url: str, client, narrow_to_shape: bool = True) -> dict:
+    """As `fetch`, but returning everything discovered — including the
+    sentences already split at boundaries learned from this document, and the
+    delimiters and terminators that were discovered along the way, so a caller
+    never has to re-split prose with a rule of its own.
+    """
     resp = await client.get(url)
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    abstract_block = soup.select_one("blockquote.abstract")
-    text = abstract_block.get_text(" ", strip=True) if abstract_block else ""
-    text = re.sub(r'^Abstract:\s*', '', text)
-
-    links: list[str] = []
-    seen: set[str] = set()
-    for a in soup.select("a[href]"):
-        href = a.get("href", "")
-        if "/abs/" in href:
-            full = href if href.startswith("http") else f"https://arxiv.org{href}"
-            if full not in seen:
-                seen.add(full)
-                links.append(full)
-
-    return text, links[:30]
-
-
-async def fetch_generic_article(url: str, client) -> tuple[str, list[str]]:
-    """Fetch a plain article page (used for RSS-discovered news articles):
-    paragraph text + outbound links found in the article body."""
-    resp = await client.get(url)
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
-        tag.decompose()
-
-    paras = soup.select("p")
-    text = " ".join(p.get_text() for p in paras)
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    links: list[str] = []
-    seen: set[str] = set()
-    for a in soup.select("a[href]"):
-        href = a.get("href", "")
-        if href.startswith("http") and href not in seen:
-            seen.add(href)
-            links.append(href)
-
-    return text, links[:20]
-
-
-async def fetch_rss_news(feed_url: str, client) -> list[tuple[str, str]]:
-    """Parse an RSS feed, return (article_url, title) for each entry."""
-    import feedparser
-    resp = await client.get(feed_url)
-    parsed = feedparser.parse(resp.text)
-    return [(entry.link, entry.get("title", "")) for entry in parsed.entries if entry.get("link")]
+    return brain_discovery.discover_structure(
+        resp.text, url, narrow_to_shape=narrow_to_shape
+    )

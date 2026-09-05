@@ -4,6 +4,109 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-05 (session 4) — Source discovery replaces every hardcoded parser; meaning layer added
+
+**Status:** implemented and tested. 186 backend tests pass.
+
+### The charter is now actually met in the fetch path
+
+This was the project's defining constraint and the code violated it everywhere.
+Removed: Wikipedia's `#mw-content-text` container and `/wiki/` link prefix,
+arXiv's `blockquote.abstract` and `/abs/`, a generic fetcher keyed to HTML's
+`<p>` element with a fixed strip-list, a citation regex, a sentence splitter
+keyed to `.!?` (in two places), fifteen hardcoded seed URLs, a source-type to
+fetcher dispatch table, the MediaWiki opensearch API contract, and a fallback
+that guessed addresses by title-casing a term and joining it with underscores.
+
+**`backend/services/brain_discovery.py`** (new) discovers, per document:
+
+- **Markup delimiters**, by scoring candidate byte pairs on three structural
+  properties: the opener leads, the enclosed material is less space-dense than
+  the text around it, and the pair opens about as often as it closes. Ranked by
+  bracketing consistency, with enclosed volume breaking ties.
+- **Prose**, as whatever falls outside the discovered spans.
+- **Sentence boundaries**, as the bytes that statistically precede a
+  whitespace-then-capital transition. English yields `.`, `?`, `!` from
+  evidence.
+- **References**, as URI-legal runs that resolve against the document's own
+  address, then narrowed two ways: a run that IS the whole span is a bare name
+  (`</div>` reads as the path `/div`), and a reference a document offers a
+  reader carries readable text, which is what separates content links from
+  stylesheets and scripts without naming a file type.
+
+`brain_fetchers` is now one `fetch` for every source. `brain_crawler` starts
+from a single `BRAIN_START_URL` and finds everything else by following what
+documents point at. `brain_learn.resolve_source` finds a page for a term by
+*reading a search page with the same discovery*, with the search address in
+`BRAIN_SEARCH_URL` — configuration, not logic.
+
+### Proof it is discovery and not a hidden HTML parser
+
+The tests feed it **formats that do not exist**: `|`/`~` for markup and `§` for
+sentence boundaries. Delimiters, prose, boundaries and references all come back
+correctly. A parser in disguise returns nothing on those.
+
+Validated live against real pages too. Stanford Encyclopedia yields 887 real
+sentences and real article references (`/entries/qualia/`,
+`/entries/consciousness-representational/`); arXiv yields real paper references.
+Neither has a line of site-specific code behind it.
+
+### The meaning layer (Function 7 step 3)
+
+**`backend/services/brain_meaning.py`** (new) discovers word senses from
+context. Every sentence a concept was extracted from is kept, embedded and
+clustered; each cluster IS a sense. The number of senses comes from the spread
+of the data, and a split is only accepted when it tightens the contexts by a
+real margin over not splitting, so an unambiguous word stays single rather than
+being fragmented. Senses are labelled by the words that distinguish them from
+the concept's other senses, which needs no dictionary.
+
+Tested against real embeddings, not mocks: "fire" used physically and
+emotionally separates into two senses, and a question about fuel and oxygen
+reaches a different sense than one about passion and conviction. The answer now
+reports which sense it settled on.
+
+### Decisions
+
+- **ChromaDB over pgvector.** Already declared in `pyproject.toml` but never
+  installed or used. It bundles a real local embedding model, so there is no
+  API key, no second service to run, and no network at answer time — which the
+  zero-internet-at-answer-time constraint requires. pgvector would have needed
+  a database extension plus a separate embedding stack.
+- **k-means on numpy** rather than adding scikit-learn for one algorithm.
+  Seeded deterministically by furthest-point, so the same store always yields
+  the same senses instead of shifting between runs.
+- **Sub-delimiters excluded from reference paths, admitted after `?`.** The
+  RFC's own query grammar. Without the exclusion `href='/a/b'` reads as one
+  address starting with the attribute name; without the re-admission
+  `/search?entry=1234` truncates and every result resolves to the same address.
+
+### Honest boundaries, stated rather than hidden
+
+- The RFC 3986 character set and relative-reference resolution are used
+  deliberately. Those define the transport, not any site's conventions.
+- `BRAIN_SEARCH_URL` still has to name *somewhere* to start. That is
+  irreducible: something must say where the brain begins. It is configuration
+  with a default, and no response format is assumed behind it.
+- `brain_query._WH_INTENT` (two entries) and `brain_nlp`'s connective tables
+  remain the only predefined linguistic rules left, both flagged in-line.
+
+### Operational finding
+
+**Wikipedia returns 403 to this network for every user agent tried**, serving a
+141-byte robot-policy stub. The old pipeline would fail identically; this is not
+caused by the rewrite. Live resolution was therefore validated against Stanford
+and arXiv instead. Because the source is now configuration, pointing the brain
+at a reachable search endpoint is a config change rather than a code change.
+
+### Open questions
+
+1. Senses are discovered and reported but do not yet partition graph edges, so
+   the graph remains single-sense. Sense-tagged edges are the next real step.
+2. Curiosity still has no feedback signal: it never learns whether reading a
+   queued concept improved later answers.
+3. The `sense` field on the answer is not yet rendered by the frontend.
+
 ## 2026-09-05 (session 3) — Built: curiosity loop + single-topic convergence
 
 **Status:** implemented and tested. 153 backend tests pass.

@@ -85,13 +85,11 @@ async def queue_reading(concepts: list[str], client, resolver) -> int:
 
     `resolver` is injected rather than imported so the source of knowledge is a
     caller's choice and this module stays free of any one site's conventions.
-    In practice `/ask` passes `brain_learn.resolve_wikipedia_title`, which
-    carries the existing Wikipedia assumption.
+    It is handed a term and returns an address, or None.
 
-    ⚠ HARDCODED-FORMAT FLAG: building the URL from a resolved title is a
-    predefined URL convention, the same one `brain_learn` already applies. This
-    inherits that violation rather than adding a new kind; when the fetch layer
-    learns to discover sources by pattern, this call site changes with it.
+    This used to build the address itself by joining a resolved title onto a
+    fixed prefix — a hardcoded URL convention. The resolver now returns a real
+    address it found by reading, so no address is constructed here at all.
 
     Returns how many rows were newly queued. Never raises: curiosity failing is
     not a reason for a request to fail, since the answer has already been sent.
@@ -104,12 +102,11 @@ async def queue_reading(concepts: list[str], client, resolver) -> int:
         async with AsyncSessionLocal() as session:
             for concept in concepts:
                 try:
-                    title = await resolver(concept, client)
+                    url = await resolver(concept, client)
                 except Exception:
                     continue
-                if not title:
+                if not url:
                     continue
-                url = f"https://en.wikipedia.org/wiki/{title}"
 
                 # Don't re-queue somewhere already read, or a URL that has
                 # already failed enough times to be dead-lettered.

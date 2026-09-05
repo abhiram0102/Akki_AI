@@ -1,11 +1,17 @@
-"""Tests for the brain crawler's source fetchers, robots.txt checker, and
-rate limiter — using a mocked httpx client, no real network calls."""
+"""Tests for the brain crawler's fetching, robots.txt checker, and rate
+limiter — using a mocked httpx client, no real network calls.
+
+There used to be a per-site fetcher here and a test keyed to Wikipedia's own
+container id and link prefix. Both are gone: one fetcher now serves every
+source, so the test that matters is that it reads a document in a format it
+has never been told about.
+"""
 import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.services.brain_fetchers import RobotsChecker, RateLimiter, fetch_wikipedia
+from backend.services.brain_fetchers import RobotsChecker, RateLimiter, fetch, fetch_structure
 
 
 def _mock_response(text: str, status_code: int = 200):
@@ -59,20 +65,51 @@ class TestRateLimiter:
         assert elapsed < 1.0
 
 
-class TestFetchWikipedia:
-    async def test_extracts_text_and_links(self):
-        html = """
-        <html><body><div id="mw-content-text">
-        <p>Fire causes heat. Heat leads to energy.</p>
-        <a href="/wiki/Heat">Heat</a>
-        <a href="/wiki/Special:Random">Random</a>
-        <a href="https://external.com/page">External</a>
-        </div></body></html>
-        """
+class TestFetch:
+    async def test_reads_html_without_any_html_rule(self):
+        """No container id, no link prefix, no element names. The same call
+        that handles this handles a site nobody has written code for."""
+        html = "<html><body>" + "".join(
+            f"<p><a href='/topic/Heat{i}'>Heat {i}</a> "
+            f"Fire causes heat in the number {i} case here.</p>"
+            for i in range(25)
+        ) + "</body></html>"
         client = AsyncMock()
         client.get.return_value = _mock_response(html)
-        text, links = await fetch_wikipedia("https://en.wikipedia.org/wiki/Fire", client)
+
+        text, links = await fetch("https://example.org/topic/Fire", client)
         assert "Fire causes heat" in text
-        assert "https://en.wikipedia.org/wiki/Heat" in links
-        assert not any("Special:" in l for l in links)
-        assert not any("external.com" in l for l in links)
+        assert "https://example.org/topic/Heat7" in links
+        # Markup must not leak into what gets read as prose.
+        assert "<" not in text and "href" not in text
+
+    async def test_reads_a_format_that_does_not_exist(self):
+        """The decisive one. This document uses `|`/`~` for markup and `§` to
+        end sentences. A fetcher carrying a hidden HTML parser returns nothing
+        here; discovery returns the prose and the references."""
+        doc = "".join(
+            f"|ref→/topic/Heat{i}~Fire causes heat in the number {i} case here§ |/ref~"
+            for i in range(25)
+        )
+        client = AsyncMock()
+        client.get.return_value = _mock_response(doc)
+
+        structure = await fetch_structure("https://example.org/topic/Fire", client)
+        assert structure["delimiters"] == ("|", "~")
+        assert "§" in structure["terminators"]
+        assert any("Fire causes heat" in s for s in structure["sentences"])
+        assert "https://example.org/topic/Heat7" in structure["links"]
+
+    async def test_sentences_come_back_already_split(self):
+        """The caller must never have to re-split prose with a rule of its own,
+        which is what the old ". " split in the crawler was."""
+        doc = "<html><body>" + "".join(
+            f"<p>Statement number {i} runs to a reasonable length here.</p>"
+            for i in range(25)
+        ) + "</body></html>"
+        client = AsyncMock()
+        client.get.return_value = _mock_response(doc)
+
+        structure = await fetch_structure("https://example.org/start", client)
+        assert len(structure["sentences"]) >= 5
+        assert all(len(s.split()) >= 5 for s in structure["sentences"])

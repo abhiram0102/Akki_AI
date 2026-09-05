@@ -29,30 +29,54 @@ async def test_apply_to_graph_upserts_and_returns_counts():
 
 
 @pytest.mark.asyncio
-async def test_resolve_title_uses_opensearch():
-    client = MagicMock()
-    resp = MagicMock(); resp.json = MagicMock(return_value=["neuron", ["Neuron"], [""], ["url"]])
-    resp.raise_for_status = MagicMock()
-    client.get = AsyncMock(return_value=resp)
-    assert await brain_learn.resolve_wikipedia_title("neurons", client) == "Neuron"
+async def test_resolve_source_reads_a_search_page_rather_than_an_api(monkeypatch):
+    """Resolution goes through the same discovery used on every other page.
+    Nothing parses a site's search API, and no address is constructed from a
+    title, so a search page in any format resolves the same way."""
+    async def fake_fetch(url, client, narrow_to_shape=True):
+        assert "neurons" in url
+        return {"text": "", "sentences": [], "delimiters": ("<", ">"),
+                "terminators": ["."],
+                "links": ["https://example.org/topic/Neuron",
+                          "https://example.org/topic/Axon"]}
+    monkeypatch.setattr("backend.services.brain_fetchers.fetch_structure", fake_fetch)
+    got = await brain_learn.resolve_source("neurons", MagicMock())
+    assert got == "https://example.org/topic/Neuron"
 
 
 @pytest.mark.asyncio
-async def test_resolve_title_falls_back_on_error():
-    client = MagicMock(); client.get = AsyncMock(side_effect=Exception("net"))
-    assert await brain_learn.resolve_wikipedia_title("quantum tunneling", client) == "Quantum_Tunneling"
+async def test_resolve_source_returns_nothing_rather_than_guessing_an_address(monkeypatch):
+    """The old fallback guessed a URL by title-casing the term and joining it
+    with underscores — one site's address convention applied universally, which
+    produced a confidently wrong address for every other site. Failing to
+    resolve must now report nothing so the caller can say it does not know."""
+    async def boom(url, client, narrow_to_shape=True):
+        raise Exception("net")
+    monkeypatch.setattr("backend.services.brain_fetchers.fetch_structure", boom)
+    assert await brain_learn.resolve_source("quantum tunneling", MagicMock()) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_source_returns_nothing_when_the_page_offers_no_references(monkeypatch):
+    async def empty(url, client, narrow_to_shape=True):
+        return {"text": "", "sentences": [], "links": [],
+                "delimiters": None, "terminators": []}
+    monkeypatch.setattr("backend.services.brain_fetchers.fetch_structure", empty)
+    assert await brain_learn.resolve_source("nothing here", MagicMock()) is None
 
 
 @pytest.mark.asyncio
 async def test_learn_concept_fetches_extracts_and_applies(monkeypatch):
     client = MagicMock()
-    resp = MagicMock()
-    resp.json = MagicMock(return_value=["neurons", ["Neuron"], [""], ["url"]])
-    resp.raise_for_status = MagicMock()
-    client.get = AsyncMock(return_value=resp)
+    monkeypatch.setattr(brain_learn, "resolve_source",
+                        AsyncMock(return_value="https://example.org/topic/Neuron"))
 
-    fetch_mock = AsyncMock(return_value=("Fire causes heat. Heat spreads energy.", []))
-    monkeypatch.setattr(brain_learn, "fetch_wikipedia", fetch_mock)
+    fetch_mock = AsyncMock(return_value={
+        "text": "Fire causes heat. Heat spreads energy.",
+        "sentences": ["Fire causes heat.", "Heat spreads energy."],
+        "links": [], "delimiters": ("<", ">"), "terminators": ["."],
+    })
+    monkeypatch.setattr(brain_learn, "fetch_structure", fetch_mock)
 
     def fake_extract(sentence):
         if sentence.startswith("Fire"):
@@ -74,11 +98,11 @@ async def test_learn_concept_fetches_extracts_and_applies(monkeypatch):
     out = await brain_learn.learn_concept("neurons", client, neo4j_driver, follow_links=0)
 
     assert out["term"] == "neurons"
-    assert out["resolved_title"] == "Neuron"
+    assert out["resolved_title"] == "https://example.org/topic/Neuron"
     assert out["new_concepts"] == 3
     assert out["new_edges"] == 2
-    assert out["sources"] == ["https://en.wikipedia.org/wiki/Neuron"]
-    fetch_mock.assert_awaited_once_with("https://en.wikipedia.org/wiki/Neuron", client)
+    assert out["sources"] == ["https://example.org/topic/Neuron"]
+    fetch_mock.assert_awaited_once_with("https://example.org/topic/Neuron", client)
     apply_mock.assert_awaited_once()
 
 
@@ -89,18 +113,19 @@ async def test_learn_concept_anchors_queried_term(monkeypatch):
     ("blockchain") into the graph. learn_concept must add an explicit anchor
     node + edges so the queried term is answerable after learning."""
     client = MagicMock()
-    resp = MagicMock()
-    resp.json = MagicMock(return_value=["blockchain", ["Blockchain"], [""], ["url"]])
-    resp.raise_for_status = MagicMock()
-    client.get = AsyncMock(return_value=resp)
+    monkeypatch.setattr(brain_learn, "resolve_source",
+                        AsyncMock(return_value="https://example.org/topic/Blockchain"))
 
-    fetch_mock = AsyncMock(
-        return_value=(
-            "Ledger records transaction. Transaction updates block. Block forms chain.",
-            [],
-        )
-    )
-    monkeypatch.setattr(brain_learn, "fetch_wikipedia", fetch_mock)
+    fetch_mock = AsyncMock(return_value={
+        "text": "Ledger records transaction. Transaction updates block. Block forms chain.",
+        "sentences": [
+            "Ledger records transaction.",
+            "Transaction updates block.",
+            "Block forms chain.",
+        ],
+        "links": [], "delimiters": ("<", ">"), "terminators": ["."],
+    })
+    monkeypatch.setattr(brain_learn, "fetch_structure", fetch_mock)
 
     def fake_extract(sentence):
         if sentence.startswith("Ledger"):
