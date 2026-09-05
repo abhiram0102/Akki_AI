@@ -1,47 +1,103 @@
 // ── AKKI Brain 3D — outer boundary shell ────────────────────────────────────
 // The neuron cloud alone reads as an unbounded scatter of points with no
-// perceivable edge. This adds a subtle, translucent wireframe outline of the
-// brain's overall two-hemisphere silhouette (reusing the exact ellipsoid
-// radii + hemisphere-offset the point cloud itself is built from, so the
-// shell always matches the cloud it bounds) plus a faint seam plane down the
-// sagittal midline -- the "inner boundary" separating left/right, standing
-// in for the medial longitudinal fissure.
+// perceivable edge. This wraps the ACTUAL point cloud in a translucent
+// wireframe boundary, built directly from `generateBrainPoints` (the same
+// function that places every neuron) via a convex hull per anatomical
+// cluster -- so the boundary always matches the real cloud shape (its two
+// hemisphere lobes + the cerebellum/stem bulge at the back), rather than a
+// generic sphere/ellipsoid approximation that doesn't resemble a brain.
+//
+// Two hemisphere hulls (with a real gap between them, from the point
+// generator's own hemisphere split) give the outer boundary; the gap itself
+// plus a faint seam plane in it stand in for the inner boundary -- the
+// sagittal fissure separating left/right. A third hull for the
+// cerebellum/stem cluster gives that characteristic bulge at the back-
+// bottom instead of a smooth ellipsoid tail.
 //
 // Deliberately NOT a solid/lit surface: a filled mesh would occlude the
 // neuron glow behind it and fight the hologram look. EdgesGeometry +
-// LineBasicMaterial gives a clean holographic wireframe (no z-fighting or
-// messy diagonal seams a `wireframe:true` material flag produces on a
-// sphere's triangle mesh) at effectively free render cost -- two static
-// LineSegments draw calls, never updated per frame.
+// LineBasicMaterial gives a clean holographic wireframe at effectively free
+// render cost -- a handful of static LineSegments draw calls, computed once
+// (the hull itself never changes; only individual neurons animate).
 import * as THREE from "three";
+import { ConvexGeometry } from "three/addons/geometries/ConvexGeometry.js";
 import { useEffect, useMemo } from "react";
-import { ELLIPSOID_RADII } from "./proceduralBrain";
+import { generateBrainPoints, ELLIPSOID_RADII } from "./proceduralBrain";
 
-const [RX, RY, RZ] = ELLIPSOID_RADII;
-// Matches proceduralBrain.ts's own HEMISPHERE_OFFSET_FACTOR (0.55) exactly,
-// so this shell traces the same two-lobe layout the point cloud samples.
-const HEMISPHERE_OFFSET = RX * 0.55;
-// Each hemisphere is narrower than the full ellipsoid width (it's one lobe,
-// not the whole brain) -- 0.62 keeps the two shells meeting near the seam
-// without overlapping into each other's interior.
-const HEMISPHERE_RX = RX * 0.62;
+const [, RY, RZ] = ELLIPSOID_RADII;
 
-function useHemisphereEdges(sign: 1 | -1): THREE.EdgesGeometry {
-  return useMemo(() => {
-    const sphere = new THREE.SphereGeometry(1, 20, 14);
-    sphere.scale(HEMISPHERE_RX, RY, RZ);
-    sphere.translate(sign * HEMISPHERE_OFFSET, 0, 0);
-    const edges = new THREE.EdgesGeometry(sphere, 1);
-    sphere.dispose();
+// Enough samples for a hull that closely tracks the real point cloud's
+// silhouette (folds average out at hull scale; this only needs the overall
+// shape) without being expensive -- computed once, not per frame.
+const HULL_SAMPLE_COUNT = 3000;
+
+// A point belongs to the cerebellum/stem cluster (rather than a cerebral
+// hemisphere) if it's well into the back-bottom region generateBrainPoints
+// reserves for that blob (centered around (0, -0.6, -0.7) — see
+// proceduralBrain.ts). This is a coarse silhouette classifier, not an
+// anatomical atlas: it only needs to separate "the back bulge" from "the two
+// main lobes" well enough for the hull shapes to look right.
+function isCerebellumStem(x: number, y: number, z: number): boolean {
+  return y < -0.35 && z < -0.25;
+}
+
+interface HullGroups {
+  left: THREE.Vector3[];
+  right: THREE.Vector3[];
+  cerebellumStem: THREE.Vector3[];
+}
+
+function classifyPoints(points: Float32Array): HullGroups {
+  const groups: HullGroups = { left: [], right: [], cerebellumStem: [] };
+  const count = Math.floor(points.length / 3);
+  for (let i = 0; i < count; i++) {
+    const x = points[i * 3];
+    const y = points[i * 3 + 1];
+    const z = points[i * 3 + 2];
+    if (isCerebellumStem(x, y, z)) {
+      groups.cerebellumStem.push(new THREE.Vector3(x, y, z));
+    } else if (x < 0) {
+      groups.left.push(new THREE.Vector3(x, y, z));
+    } else {
+      groups.right.push(new THREE.Vector3(x, y, z));
+    }
+  }
+  return groups;
+}
+
+/** ConvexGeometry throws on fewer than 4 (non-degenerate) points -- guard defensively since the classifier's split is heuristic, not guaranteed balanced. */
+function safeHullEdges(points: THREE.Vector3[]): THREE.EdgesGeometry | null {
+  if (points.length < 4) return null;
+  try {
+    const hull = new ConvexGeometry(points);
+    const edges = new THREE.EdgesGeometry(hull, 1);
+    hull.dispose();
     return edges;
-  }, [sign]);
+  } catch {
+    // Degenerate (near-coplanar) point set -- skip that piece rather than crash the scene.
+    return null;
+  }
 }
 
 export default function BrainShell() {
-  const leftEdges = useHemisphereEdges(-1);
-  const rightEdges = useHemisphereEdges(1);
-  useEffect(() => () => leftEdges.dispose(), [leftEdges]);
-  useEffect(() => () => rightEdges.dispose(), [rightEdges]);
+  const hullEdges = useMemo(() => {
+    const points = generateBrainPoints(HULL_SAMPLE_COUNT);
+    const groups = classifyPoints(points);
+    return {
+      left: safeHullEdges(groups.left),
+      right: safeHullEdges(groups.right),
+      cerebellumStem: safeHullEdges(groups.cerebellumStem),
+    };
+  }, []);
+
+  useEffect(
+    () => () => {
+      hullEdges.left?.dispose();
+      hullEdges.right?.dispose();
+      hullEdges.cerebellumStem?.dispose();
+    },
+    [hullEdges]
+  );
 
   const lineMaterial = useMemo(
     () =>
@@ -58,8 +114,8 @@ export default function BrainShell() {
   useEffect(() => () => lineMaterial.dispose(), [lineMaterial]);
 
   // Sagittal midline seam: a thin, very faint plane at x=0 spanning the
-  // brain's y/z extent -- reads as a translucent membrane between
-  // hemispheres rather than a hard line, matching the hologram aesthetic.
+  // brain's y/z extent -- sits in the real gap between the two hemisphere
+  // hulls, reading as a translucent membrane rather than a hard line.
   const seamGeometry = useMemo(() => new THREE.PlaneGeometry(RZ * 2.15, RY * 2.15), []);
   useEffect(() => () => seamGeometry.dispose(), [seamGeometry]);
 
@@ -80,8 +136,11 @@ export default function BrainShell() {
 
   return (
     <group frustumCulled={false}>
-      <lineSegments geometry={leftEdges} material={lineMaterial} />
-      <lineSegments geometry={rightEdges} material={lineMaterial} />
+      {hullEdges.left && <lineSegments geometry={hullEdges.left} material={lineMaterial} />}
+      {hullEdges.right && <lineSegments geometry={hullEdges.right} material={lineMaterial} />}
+      {hullEdges.cerebellumStem && (
+        <lineSegments geometry={hullEdges.cerebellumStem} material={lineMaterial} />
+      )}
       {/* Default plane geometry lies in the XY plane (normal +Z); rotate 90°
           around Y so its normal points along X -- perpendicular to the
           hemisphere split, spanning height (Y) and depth (Z). */}
