@@ -15,6 +15,14 @@ FORWARD_CONNECTIVES = {"cause", "lead", "produce", "create", "enable", "trigger"
 # (the thing needed/depended upon).
 BACKWARD_CONNECTIVES = {"require", "need", "depend", "rely", "stem"}
 
+# Light/copular/auxiliary verbs that carry no real relationship — excluded
+# from the general subject→object extraction so the graph isn't flooded with
+# "X is Y" / "X has Y" noise.
+_SKIP_VERBS = {
+    "be", "have", "do", "seem", "become", "appear", "get", "make", "let",
+    "say", "tell", "call", "use", "include", "involve", "mean", "remain",
+}
+
 
 # Only nouns and proper nouns anchor a concept. This filters out function
 # words (pronouns like "you"/"it"/"that", determiners, auxiliaries) that spaCy
@@ -94,23 +102,37 @@ def _object_of(token) -> str | None:
 
 
 def extract_dependencies(sentence: str) -> list[tuple[str, str]]:
-    """Return a list of (cause, effect) pairs found in the sentence."""
+    """Return (cause/source, effect/target) concept pairs found in the sentence.
+
+    Two layers, both over real dependency structure (never regex):
+      1. Typed causal connectives ("X causes/leads to/requires Y") — high
+         confidence, direction set by the connective's meaning.
+      2. General subject→object relations for any other content verb ("X
+         protects Y", "X encrypts Y") — this is what makes the graph DENSE:
+         ordinary sentences produce edges instead of only rare causal ones.
+    Copular/auxiliary/light verbs are skipped so "X is Y" noise stays out.
+    """
     doc = get_nlp()(sentence)
     pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(a: str | None, b: str | None):
+        if a and b and a != b and (a, b) not in seen:
+            seen.add((a, b))
+            pairs.append((a, b))
 
     for token in doc:
+        if token.pos_ != "VERB":
+            continue
         lemma = token.lemma_.lower()
+        subject = _subject_of(token)
+        obj = _object_of(token)
 
         if lemma in FORWARD_CONNECTIVES:
-            subject = _subject_of(token)
-            obj = _object_of(token)
-            if subject and obj:
-                pairs.append((subject, obj))
-
+            add(subject, obj)                 # cause → effect
         elif lemma in BACKWARD_CONNECTIVES:
-            subject = _subject_of(token)
-            obj = _object_of(token)
-            if subject and obj:
-                pairs.append((obj, subject))
+            add(obj, subject)                 # prerequisite → dependent
+        elif lemma not in _SKIP_VERBS:
+            add(subject, obj)                 # general subject → object relation
 
     return pairs

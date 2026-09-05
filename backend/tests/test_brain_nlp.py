@@ -90,3 +90,17 @@ def test_single_word_concepts_unchanged_by_phrase_logic():
     # Existing single-token behaviour must be preserved.
     assert ("fire", "heat") in extract_dependencies("Fire causes heat.")
     assert ("fuel", "engine") in extract_dependencies("The engine requires fuel.")
+
+
+def test_general_verb_relations_are_extracted():
+    # Density: an ordinary transitive verb (not in the causal connective sets)
+    # still yields a subject→object edge, so normal prose feeds the graph.
+    assert ("encryption", "datum") in extract_dependencies("Encryption protects data.")
+    assert ("firewall", "malicious traffic") in extract_dependencies("Firewalls block malicious traffic.")
+
+
+def test_copula_and_light_verbs_produce_no_edge():
+    # "is"/"has"/"uses" carry no real relationship — must stay out of the graph.
+    assert extract_dependencies("The sky is blue.") == []
+    assert extract_dependencies("The system has a database.") == []
+    assert extract_dependencies("The app uses a library.") == []

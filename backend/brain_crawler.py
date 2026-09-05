@@ -22,21 +22,35 @@ from backend.models import BrainFrontier, BrainVisitedPage, BrainDeadLetter, Bra
 from backend.services.neo4j_service import get_driver, ensure_schema
 from backend.services.brain_fetchers import (
     RobotsChecker, RateLimiter, fetch_wikipedia, fetch_arxiv,
-    fetch_generic_article, fetch_rss_news,
+    fetch_generic_article,
 )
 from backend.services.brain_nlp import extract_dependencies
 from backend.services.brain_stats_math import log_likelihood_ratio
 
 logger = logging.getLogger("akki.brain_crawler")
 
+# Knowledge sources only. News was removed deliberately: it flooded the graph
+# with cookie/DMCA/marketing boilerplate and starved the real knowledge (the
+# crawl went 4753 news : 5 wiki pages). Wikipedia articles state clean causal
+# and relational sentences, which is what the extractor needs. A broad, diverse
+# seed set across domains so the graph doesn't collapse into one region.
 SEEDS = [
     ("https://en.wikipedia.org/wiki/Fire", "fire", "wikipedia"),
     ("https://en.wikipedia.org/wiki/Energy", "energy", "wikipedia"),
     ("https://en.wikipedia.org/wiki/Evolution", "evolution", "wikipedia"),
     ("https://en.wikipedia.org/wiki/Consciousness", "consciousness", "wikipedia"),
     ("https://en.wikipedia.org/wiki/Mathematics", "mathematics", "wikipedia"),
+    ("https://en.wikipedia.org/wiki/Computer_security", "computer security", "wikipedia"),
+    ("https://en.wikipedia.org/wiki/Cryptography", "cryptography", "wikipedia"),
+    ("https://en.wikipedia.org/wiki/Machine_learning", "machine learning", "wikipedia"),
+    ("https://en.wikipedia.org/wiki/Immune_system", "immune system", "wikipedia"),
+    ("https://en.wikipedia.org/wiki/Climate_change", "climate change", "wikipedia"),
+    ("https://en.wikipedia.org/wiki/Economics", "economics", "wikipedia"),
+    ("https://en.wikipedia.org/wiki/Electricity", "electricity", "wikipedia"),
+    ("https://en.wikipedia.org/wiki/Photosynthesis", "photosynthesis", "wikipedia"),
+    ("https://en.wikipedia.org/wiki/Neuron", "neuron", "wikipedia"),
+    ("https://en.wikipedia.org/wiki/Vaccine", "vaccine", "wikipedia"),
 ]
-NEWS_FEED_URL = os.environ.get("BRAIN_NEWS_FEED_URL", "https://feeds.bbci.co.uk/news/rss.xml")
 
 MAX_ATTEMPTS = 3
 PRUNE_EVERY_N_PAGES = 200
@@ -203,7 +217,13 @@ async def _prune_low_value_edges(neo4j_driver) -> None:
             "UNWIND rels[50..] AS excess "
             "DELETE excess"
         )
-    logger.info("Pruning complete: dropped low-count and long-tail edges.")
+        # Delete concepts left with no edges after pruning. Previously these
+        # orphans accumulated (83% of the graph became edgeless dust); a concept
+        # with no connections is not knowledge, so remove it.
+        await session.run(
+            "MATCH (c:Concept) WHERE NOT (c)-[:CO_OCCURS]-() DELETE c"
+        )
+    logger.info("Pruning complete: dropped low-count/long-tail edges and orphaned concepts.")
 
 
 async def main() -> None:
@@ -222,22 +242,14 @@ async def main() -> None:
             # Seed the frontier if empty
             result = await pg_session.execute(select(BrainFrontier).limit(1))
             if result.scalar_one_or_none() is None:
+                # Knowledge seeds only — no news RSS bootstrap (it flooded the
+                # frontier and drowned the knowledge sources).
                 for url, concept, source_type in SEEDS:
                     await pg_session.execute(
                         pg_insert(BrainFrontier).values(
                             url=url, concept=concept, source_type=source_type,
                         ).on_conflict_do_nothing()
                     )
-                try:
-                    news_items = await fetch_rss_news(NEWS_FEED_URL, client)
-                    for url, title in news_items[:20]:
-                        await pg_session.execute(
-                            pg_insert(BrainFrontier).values(
-                                url=url, concept=title[:200], source_type="news",
-                            ).on_conflict_do_nothing()
-                        )
-                except Exception as e:
-                    logger.warning("Initial RSS seed failed (non-fatal): %s", e)
                 await pg_session.commit()
 
             logger.info("Brain crawler starting.")
