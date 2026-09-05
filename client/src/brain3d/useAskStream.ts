@@ -37,8 +37,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // deterministically templated `summary` sentence, an unprompted `observation`,
 // an honest `gap`, a `confidence` score, which `sense` of the concept the
 // answer settled on (null when it only has one known meaning — backend/
-// services/brain_meaning.py's embedding+clustering "meaning layer"), and
-// `provenance` (source URLs actually read). Every clause in it is composed
+// services/brain_meaning.py's embedding+clustering "meaning layer"),
+// whether that sense actually narrowed the evidence (`senseFiltered` --
+// can be false with a `sense` present, since the graph is still
+// single-sense today), and `provenance` (source URLs actually read).
+// Every clause in it is composed
 // from real graph edges —
 // nothing in the answer path is LLM-generated. `associations` and `inferred`
 // are unchanged and still come first in the payload, so any consumer that
@@ -200,6 +203,15 @@ export interface AskComposedAnswer {
    * wrong sense of a word is the most misleading thing this brain can do.
    */
   sense: { sense: number; label: string[]; contextCount: number; example: string } | null;
+  /**
+   * Whether the evidence above was actually narrowed to `sense` (the graph
+   * itself is still single-sense today, so this can be false even with a
+   * `sense` present -- that's a real, expected state, not a bug: it means
+   * the brain knows which meaning was asked about but couldn't yet narrow
+   * the evidence to just that meaning). True is a stronger claim than a
+   * label alone, worth distinguishing in the UI.
+   */
+  senseFiltered: boolean;
   provenance: string[];
 }
 

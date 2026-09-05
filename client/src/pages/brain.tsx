@@ -383,7 +383,12 @@ export default function BrainPage() {
           // wrong sense of a word is the most misleading thing this brain
           // can do, so that ambiguity is surfaced rather than left implicit.
           const sense = askAnswer?.answer?.sense;
-          const withSense = sense?.label.length ? `[${sense.label.join(", ")}] ${summary}` : summary;
+          const withSense = sense?.label.length
+            // `senseFiltered` is a stronger claim than the label alone --
+            // it means the evidence itself was narrowed to this meaning,
+            // not just labelled with it (see useAskStream's AskComposedAnswer).
+            ? `[${sense.label.join(", ")}${askAnswer?.answer?.senseFiltered ? " — narrowed" : ""}] ${summary}`
+            : summary;
           // `curious` lands after `answer` when the brain queued its weakest
           // spots to go read on its own — say so instead of blanking the
           // summary back out (see useAskStream's contract doc).
