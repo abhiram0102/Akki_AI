@@ -50,7 +50,7 @@ import {
   type MutableRefObject,
 } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { AdaptiveDpr, OrbitControls } from "@react-three/drei";
+import { OrbitControls } from "@react-three/drei";
 import { Bloom, ChromaticAberration, EffectComposer } from "@react-three/postprocessing";
 import NeuronField from "./NeuronField";
 import Signals, { type SignalEdge } from "./Signals";
@@ -396,7 +396,12 @@ const BrainScene = forwardRef<BrainSceneHandle, BrainSceneProps>(function BrainS
           minDistance={0.9}
           maxDistance={6}
         />
-        <AdaptiveDpr />
+        {/* AdaptiveDpr removed: it drops/restores render resolution live in
+            response to frame-time regression -- exactly the kind of thing
+            camera-drag interaction triggers -- and resizing the renderer's
+            (and EffectComposer's) targets mid-interaction is a likely
+            source of the reported blink/flicker while moving the model.
+            Scene is small enough that a fixed dpr is fine without it. */}
 
         <EffectComposer multisampling={0}>
           <Bloom mipmapBlur luminanceThreshold={0.15} luminanceSmoothing={0.3} intensity={1.1} />
