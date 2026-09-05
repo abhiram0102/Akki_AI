@@ -4,6 +4,75 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 10) — Parser model: decided, and the measurement redirected the work
+
+**Status:** decided and recorded. 219 backend tests pass.
+
+### The decision: stay on the small model
+
+lex measured the three parser models and correctly refused to switch without
+sign-off, bringing quality on the hand-written gold set:
+
+| model | hand-written F1 | load | peak RSS |
+|---|---|---|---|
+| sm | 0.857 | 3.0s | 136MB |
+| md | 0.857 | 4.3s | 341MB |
+| lg | 0.909 | 5.5s | 710MB |
+
+On that table alone the large model looks like the answer. Two numbers were
+missing, and both were needed because they are what the decision actually turns
+on: how many relations each model draws from real pages, and how each scores on
+the **sampled real-text** set that lex themselves identified as the number to
+trust over the hand-written one.
+
+| model | relations from corpus | real-text precision | real-text recall |
+|---|---|---|---|
+| sm | 149 | 0.500 | 1.000 |
+| md | 154 | 0.571 | 1.000 |
+| lg | 156 | **0.444** | 1.000 |
+
+**The large model is the best on hand-written cases and the worst on real
+crawled text.** That is exactly the failure a small hand-written set is prone to
+hide: it is better at the sentence shapes someone thought to write down and
+worse at the ones the web actually produces. It also costs 5.2x the memory, in
+a request path, with a second copy running in the crawler.
+
+The spread across all three is within the noise of a 45-sentence sample, so no
+switch is justified on this evidence. The small model stays, now behind
+`BRAIN_SPACY_MODEL` so that revisiting it is a setting rather than a code change
+plus two Dockerfile edits.
+
+### What the measurement actually found
+
+More useful than the model comparison itself: **recall is already saturated at
+1.000 on every model, and precision is the binding constraint.** The extractor
+is finding everything it should and also things it should not.
+
+No parser model fixes that, which is why swapping one would have been effort
+spent in the wrong place. lex's real-text analysis named the causes, and half of
+them are mine rather than the extractor's: fragments arriving from the discovery
+layer — navigation chrome and a citation-stripping remnant — are non-clauses
+that the parser then invents structure from. That is a `brain_discovery`
+problem, and it is now the highest-value open item in extraction quality.
+
+### Rejected
+
+- **Switching to the large model.** Worse where it counts, most expensive.
+- **Switching to the medium model.** Best real-text precision of the three, but
+  the margin is roughly one false positive out of eight predictions on a
+  45-sentence sample. Not distinguishable from noise, and it costs 2.5x the
+  memory. Revisit if the gold set grows enough to separate them.
+
+### Open questions
+
+1. Discovery-layer fragments feeding the parser corrupted input. Mine to fix.
+2. Whether md beats sm is unresolved rather than answered; the sample is too
+   small to tell. Growing the real-text set would settle it.
+3. Word sense induction has published evaluation protocols (SemEval Fuzzy
+   B-Cubed, V-Measure) that apply to `brain_meaning.py` but need sense-labelled
+   data this project does not have. Flagged by lex, still undecided.
+
+
 ## 2026-09-06 (session 9) — Both session-8 defects fixed; the evaluation replaced
 
 **Status:** implemented and tested. 219 backend tests pass. Full

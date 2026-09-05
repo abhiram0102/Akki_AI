@@ -4,6 +4,8 @@ Replaces the original brain/ prototype's regex keyword matching ("split the
 sentence after the string 'leads to'") with real subject/verb/object
 structure from spaCy's dependency parser.
 """
+import os
+
 import spacy
 
 _NLP = None
@@ -68,10 +70,36 @@ def _normalized_lemma(token) -> str:
     return token.lemma_.lower()
 
 
+# Which parser model to load. Configurable so that changing it is a setting
+# rather than a code change plus two Dockerfile edits.
+#
+# The default stays on the SMALL model, and that is a measured decision rather
+# than an unexamined default. All three models were compared on the stored
+# corpus and on the sampled real-text gold set (docs/evaluation-log.md):
+#
+#   model  relations  real-text precision  real-text recall  peak RSS
+#   sm           149                0.500             1.000     136MB
+#   md           154                0.571             1.000     341MB
+#   lg           156                0.444             1.000     710MB
+#
+# The large model scores best on the hand-written cases and WORST on real
+# crawled text, which is exactly what a fifteen-case hand-written set is prone
+# to hide: it was better at the sentence shapes someone thought to write down
+# and worse at the ones the web actually produces. It also costs 5.2x the
+# memory, in a request path, with a second copy in the crawler.
+#
+# The spread between all three is within the noise of a 45-sentence sample, so
+# no switch is justified. What the numbers do say clearly is that recall is
+# already saturated at 1.000 everywhere and PRECISION is the binding
+# constraint — and precision is limited by fragments arriving from the
+# discovery layer, which no parser model fixes.
+MODEL_NAME = os.getenv("BRAIN_SPACY_MODEL", "en_core_web_sm")
+
+
 def get_nlp():
     global _NLP
     if _NLP is None:
-        _NLP = spacy.load("en_core_web_sm")
+        _NLP = spacy.load(MODEL_NAME)
     return _NLP
 
 
