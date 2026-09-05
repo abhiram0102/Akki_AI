@@ -4,6 +4,69 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-05 (session 6) — Wikipedia access fixed by compliance; discovery hardened on real pages
+
+**Status:** 195 backend tests pass.
+
+### The 403 was a missing contact, not a block to route around
+
+Every Wikimedia request returned 403 with a 141-byte pointer to their robot
+policy, through the API as well as the HTML. The cause was the User-Agent: it
+described the crawler but gave no way to reach whoever runs it, which their
+published policy requires. Adding a contact returns 200 immediately.
+
+A contact URL satisfies the policy on its own, so the default carries no
+personal address; `BRAIN_CONTACT` lets an operator point it at themselves,
+which is right since it is their deployment doing the fetching. Both the
+crawler and the on-demand path now share one header set.
+
+**Rejected: proxying or disguising the crawler to evade the block.** It would
+have meant circumventing an access control the site publishes and enforces
+deliberately, and it was unnecessary — the site documents exactly what it wants
+and honouring that works. Wikimedia also offers bulk dumps for volume, which is
+the right route if reading ever outgrows polite crawling.
+
+### Two defects in discovery that only real pages exposed
+
+Earlier validation used clean sources. A live Wikipedia article broke both, and
+both were fixed from measurements rather than guesses.
+
+**Sentence boundaries were being learned from navigation.** Scoring candidates
+by how often a byte precedes a capital picked a navigation arrow (105
+occurrences, 91% rate) over the full stop (2360 occurrences, 29% rate), because
+the page also carries scripts and menus where a full stop is followed by
+anything. Candidates are now scored on evidence *and* lift over the document's
+own base rate, so a page of prose and a page of markup are each judged on their
+own terms. The full stop now wins on both Wikipedia and Stanford.
+
+**Script and data were being read as prose.** Code between a script's opening
+and closing tags is not itself inside a markup span, so it survived separation
+and became "sentences". Statements are now required to be mostly ordinary
+words, which removes it without naming scripts, data formats or any element.
+Wikipedia went from opening with `(function(){var className=...` to real text.
+
+### Measured limitation, not fixed
+
+On a page that is mostly navigation with little prose — an arXiv abstract page
+is 5KB of extracted text, largely menus — boundary discovery has little to work
+with. Its base rate of capitals-after-punctuation is 0.36, so almost anything
+precedes a capital and the evidence is genuinely uninformative; brackets score
+above the full stop. This behaviour predates this session's changes and is not
+a regression. The mitigations are that non-prose statements are now discarded
+and that the graph's own statistical floor filters what survives.
+
+Wikipedia's table-of-contents text still reads as prose, because it *is*
+word-like and telling it apart needs element context the discovery layer
+deliberately does not have.
+
+### Known cosmetic issue
+
+An escaped ampersand in an address survives into the resolved URL
+(`...&amp;redirect=no`). Decoding it would mean teaching the fetch path one
+markup language's escape table, which is the class of assumption this layer
+exists to avoid. Flagged rather than silently hardcoded; the address still
+resolves.
+
 ## 2026-09-05 (session 5) — Senses now change the answer, not just label it
 
 **Status:** implemented and tested. 193 backend tests pass.

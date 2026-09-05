@@ -17,8 +17,23 @@ from backend.services.brain_stats_math import log_likelihood_ratio
 # descriptive browser-like UA is required to fetch article content. Kept in
 # sync with backend/brain_crawler.py's client headers — shared here so other
 # on-demand callers (e.g. /api/brain/ask) use the same identity.
+# How the crawler identifies itself.
+#
+# Wikimedia (and a growing number of sites) reject a User-Agent that does not
+# say who is running the tool and how to reach them; that is a published
+# requirement, not an obstacle to route around. The previous string described
+# the crawler but carried no contact, and every Wikimedia request returned 403
+# with a 141-byte pointer to their robot policy — including through the API.
+# Supplying a contact returns 200 immediately.
+#
+# A contact URL satisfies the policy on its own, so the default carries no
+# personal address. Operators running their own instance should set
+# BRAIN_CONTACT to a page or address that reaches them, since it is their
+# deployment doing the fetching.
+BRAIN_CONTACT = os.getenv("BRAIN_CONTACT", "https://github.com/abhiram0102/akki")
+
 UA_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; AKKI-Brain/1.0; +knowledge-graph research crawler)",
+    "User-Agent": f"AKKI-Brain/1.0 ({BRAIN_CONTACT}) python-httpx",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }

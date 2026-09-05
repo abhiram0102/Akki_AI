@@ -82,10 +82,11 @@ _MAX_COVERAGE = 0.97
 # How many of the most frequent punctuation bytes to consider as delimiters.
 _DELIMITER_CANDIDATES = 10
 
-# A byte must precede a sentence-like transition this often, with this much
-# evidence, before it counts as a terminator.
-_TERMINATOR_RATE = 0.5
+# A byte must precede this many sentence-like transitions before it is
+# considered at all, and must then score at least this share of the best
+# candidate's score (see `discover_sentence_terminators`).
 _TERMINATOR_EVIDENCE = 3
+_TERMINATOR_SHARE = 0.5
 
 # A reference a document offers to a reader carries readable text; this is how
 # many letters must follow a span before it counts as one.
@@ -95,6 +96,15 @@ _MIN_ANCHOR_LETTERS = 2
 # rather than statements, in any language with word separators.
 _MIN_SENTENCE_WORDS = 5
 _MAX_SENTENCE_WORDS = 40
+
+# A statement is something a person would read. Script and data embedded in a
+# page sit OUTSIDE the markup delimiters — the code between a script's opening
+# and closing tags is not itself inside a span — so it survives separation and
+# reads as prose. It does not look like prose though: it is dense with quotes,
+# braces, colons and digits, and thin on plain words. Requiring most of a
+# statement's tokens to be ordinary words removes it without naming scripts,
+# data formats, or any element.
+_MIN_WORD_RATIO = 0.6
 
 
 def _candidate_delimiters(raw: str) -> list[str]:
@@ -268,11 +278,38 @@ def discover_sentence_terminators(text: str) -> set[str]:
         if following and following.isupper():
             followed_by_boundary[ch] += 1
 
-    return {
-        ch for ch, hits in followed_by_boundary.items()
-        if hits >= _TERMINATOR_EVIDENCE
-        and hits / occurrences[ch] >= _TERMINATOR_RATE
-    }
+    if not followed_by_boundary:
+        return set()
+
+    # Scoring by rate alone fails on a real page, and the failure was measured
+    # rather than imagined. On a Wikipedia article the full stop precedes 681
+    # boundaries but does so only 29% of the time, because the page also
+    # carries scripts and navigation where a full stop is followed by anything.
+    # Meanwhile a navigation arrow appearing 105 times precedes a boundary 91%
+    # of the time. A rate threshold therefore picks the arrow and discards the
+    # full stop, which is exactly backwards.
+    #
+    # Both halves matter: how OFTEN a byte ends a sentence, and how much more
+    # often it does so than punctuation in this text generally. The second is
+    # measured against the document's own base rate, so a page full of prose
+    # and a page full of markup are each judged on their own terms.
+    total_boundaries = sum(followed_by_boundary.values())
+    total_occurrences = sum(occurrences[ch] for ch in followed_by_boundary)
+    base_rate = total_boundaries / total_occurrences if total_occurrences else 0
+    if base_rate <= 0:
+        return set()
+
+    scores: dict[str, float] = {}
+    for ch, hits in followed_by_boundary.items():
+        if hits < _TERMINATOR_EVIDENCE:
+            continue
+        lift = (hits / occurrences[ch]) / base_rate
+        scores[ch] = hits * lift
+
+    if not scores:
+        return set()
+    best = max(scores.values())
+    return {ch for ch, score in scores.items() if score >= best * _TERMINATOR_SHARE}
 
 
 def split_sentences(text: str, terminators: set[str] | None = None) -> list[str]:
@@ -300,7 +337,20 @@ def split_sentences(text: str, terminators: set[str] | None = None) -> list[str]
     return [
         s for s in candidate
         if _MIN_SENTENCE_WORDS <= len(s.split()) <= _MAX_SENTENCE_WORDS
+        and _is_prose(s)
     ]
+
+
+def _is_prose(sentence: str) -> bool:
+    """Whether a statement reads like language rather than like code or data."""
+    tokens = sentence.split()
+    if not tokens:
+        return False
+    words = sum(
+        1 for t in tokens
+        if t.strip(".,;:()[]{}\"'").isalpha()
+    )
+    return words / len(tokens) >= _MIN_WORD_RATIO
 
 
 def _address_runs(fragment: str, delimiters: tuple[str, str] | None = None) -> list[str]:

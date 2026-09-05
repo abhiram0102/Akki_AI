@@ -173,3 +173,35 @@ def test_empty_and_degenerate_input_is_handled():
     assert bd.discover_delimiters("") is None
     assert bd.discover_structure("", "https://example.org/")["sentences"] == []
     assert bd.discover_references([], "https://example.org/") == []
+
+
+# ── Boundary discovery has to survive a noisy real page ──────────────────────
+
+def test_a_frequent_terminator_beats_a_rare_but_consistent_artifact():
+    """Measured on a real article: the full stop preceded 681 boundaries at a
+    29% rate, while a navigation arrow appearing 105 times preceded one 91% of
+    the time. Judging by rate alone picks the arrow and discards the full stop,
+    which is exactly backwards, so evidence has to count too."""
+    prose = " ".join(
+        f"This is statement number {i} and it runs on. Another clause follows it."
+        for i in range(40)
+    )
+    # A rare artifact that is almost always followed by a capitalised word.
+    artifact = " ".join(f"^ Jump up{i} ^ Back{i}" for i in range(8))
+    terminators = bd.discover_sentence_terminators(prose + " " + artifact)
+    assert "." in terminators
+    assert "^" not in terminators
+
+
+def test_code_and_data_are_not_read_as_statements():
+    """Script and data embedded in a page sit OUTSIDE the markup delimiters,
+    so they survive separation and would otherwise be learned from as prose."""
+    text = (
+        'var className="client-js vector-feature-enabled", wgPageAssessments={"Algae":'
+        '{"class":"B","importance":"Top"}}, x=0. '
+        + " ".join(f"Photosynthesis converts light into chemical energy in step {i}."
+                   for i in range(6))
+    )
+    sentences = bd.split_sentences(text)
+    assert any("Photosynthesis converts light" in s for s in sentences)
+    assert not any("wgPageAssessments" in s or "className" in s for s in sentences)

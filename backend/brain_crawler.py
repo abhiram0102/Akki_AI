@@ -172,11 +172,9 @@ async def main() -> None:
 
     # Wikipedia (and many sites) return 403 to the default httpx User-Agent;
     # a descriptive browser-like UA is required to fetch article content.
-    _headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; AKKI-Brain/1.0; +knowledge-graph research crawler)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+    # Shared with brain_learn so both paths identify the crawler the same way,
+    # including the contact a site's robot policy requires.
+    _headers = brain_learn.UA_HEADERS
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=_headers) as client:
         async with AsyncSessionLocal() as pg_session:
             # Seed the frontier if empty
