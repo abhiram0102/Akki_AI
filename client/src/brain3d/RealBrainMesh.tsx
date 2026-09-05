@@ -45,9 +45,6 @@ varying vec3 vNormal;
 varying vec3 vViewPosition;
 void main() {
   vec3 normal = normalize(vNormal);
-  // Flip for back-facing triangles (material is double-sided) so the rim
-  // reads correctly from both outside and inside the mesh.
-  if (!gl_FrontFacing) normal = -normal;
   vec3 viewDir = normalize(vViewPosition);
   float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.5);
   // Dim body (barely there) + bright glowing rim where the surface curves
@@ -120,7 +117,14 @@ export default function RealBrainMesh() {
         transparent: true,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
-        side: THREE.DoubleSide,
+        // FrontSide (not DoubleSide): with depthWrite disabled (needed so
+        // this translucent shell doesn't occlude the neuron glow behind
+        // it), a double-sided mesh's own front and back triangles have no
+        // stable draw order relative to each other -- as the camera
+        // orbits, which layer "wins" flips unpredictably, reading as a
+        // screen-blink flicker. Culling back faces removes the conflict
+        // entirely: only one triangle layer ever rasterizes per pixel.
+        side: THREE.FrontSide,
       }),
     [uniforms]
   );
