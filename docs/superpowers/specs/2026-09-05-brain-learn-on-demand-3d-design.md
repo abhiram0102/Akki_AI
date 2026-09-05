@@ -70,12 +70,17 @@ Extract the reusable heart of `brain_crawler.crawl_one_page` (currently lines
 - `apply_to_graph(neo4j_session, word_freq, edge_counts) -> {new_concepts, new_edges}`
   — the exact concept/edge/G² upsert Cypher already in `crawl_one_page`
   (the three batched `session.run` calls). Returns counts of what was added.
-- `learn_concept(term, client, neo4j_driver, follow_links=1) -> {term, new_concepts, new_edges, sources}`
-  — maps `term` to its Wikipedia article URL
-  (`https://en.wikipedia.org/wiki/<Title_Case_underscored>`), fetches via the
-  existing `fetch_wikipedia` (already has the browser User-Agent fix),
-  extracts, applies to graph, optionally follows the top `follow_links` linked
-  articles for depth, returns a summary of what was learned.
+- `resolve_wikipedia_title(term, client) -> str | None`
+  — resolves an arbitrary user term to the best real article title via the
+  MediaWiki search/opensearch API (`action=opensearch`), handling plurals,
+  casing, synonyms, and disambiguation. Falls back to naive title-casing only
+  if the API is unreachable. **Without this, learn-on-demand silently fails on
+  a large fraction of natural inputs.**
+- `learn_concept(term, client, neo4j_driver, follow_links=1) -> {term, resolved_title, new_concepts, new_edges, sources}`
+  — resolves the term (above), fetches the article via the existing
+  `fetch_wikipedia` (already has the browser User-Agent fix), extracts, applies
+  to graph, optionally follows the top `follow_links` linked articles for
+  depth, returns a summary of what was learned.
 
 `brain_crawler.crawl_one_page` is refactored to call `fetch_and_extract` +
 `apply_to_graph` instead of owning that logic. **No duplicated graph code.**
@@ -84,8 +89,10 @@ Extract the reusable heart of `brain_crawler.crawl_one_page` (currently lines
 
 - Auth: `Depends(get_current_user)` (same gate as `/discover`).
 - Request body: `{ "concept": str }` (new `BrainAskRequest` schema).
-- Response: `StreamingResponse(media_type="text/event-stream")` with headers
-  `Cache-Control: no-cache`, `X-Accel-Buffering: no`, `Connection: keep-alive`.
+- Response: SSE via `sse-starlette`'s `EventSourceResponse` (handles framing,
+  periodic keepalive pings, and client-disconnect for us) — preferred over a
+  hand-rolled `StreamingResponse`. Headers include `X-Accel-Buffering: no` so
+  the frontend proxy flushes events live.
 - Async generator logic:
   1. Normalize concept. Emit `{stage:"thinking"}`.
   2. `assoc = _top_associations(concept)`. If `len(assoc) >= LEARN_THRESHOLD`
@@ -93,13 +100,29 @@ Extract the reusable heart of `brain_crawler.crawl_one_page` (currently lines
   3. Else emit `{stage:"gap", concept}`, then `{stage:"learning", source:"Wikipedia"}`,
      call `learn_concept(...)` (blocking NLP runs via `run_in_threadpool`),
      emit `{stage:"grew", newConcepts, newEdges}`.
-  4. Re-run `_top_associations`; emit `{stage:"answer", associations, path}` (or
-     `{stage:"answer", associations:[], note:"still thin — crawler will deepen it"}`).
-  5. Emit `{stage:"done"}`. Periodic `: keep-alive\n\n` comments during long fetches.
-  6. `await request.is_disconnected()` checks to stop work if the client leaves.
-- SSE frame format: `data: <json>\n\n` (one JSON object per event).
+  4. Re-run `_top_associations`; also compute **inferred** links (§5.4). Emit
+     `{stage:"answer", associations, inferred, path}` (or with `associations:[]`
+     + `note:"still thin — crawler will deepen it"` when nothing was learned).
+  5. Emit `{stage:"done"}`. `sse-starlette` sends keepalive pings during long
+     fetches and stops the generator if the client disconnects.
+- SSE payload: one JSON object per event (`data:`), framed by `sse-starlette`.
 
-### 5.3 Config
+### 5.4 Inference layer (the reasoning step — what makes it not-RAG)
+
+Retrieving a concept's stored neighbours is still retrieval. The engine must
+also **derive** links no single source stated. In `brain_service`:
+
+- `infer_links(concept, limit=5) -> list[{concept, via, strength, derived:true}]`
+  — reuse `_reachable_with_depth(concept, max_depth=2)` to find concepts two
+  hops away that are **not** direct neighbours of `concept`. For each, record
+  the intermediate concept (`via`) and a strength = product/min of the two
+  edge G² values along the path. Rank by strength, return the top `limit`.
+- The `/ask` answer includes these as a separate `inferred` list, rendered
+  distinctly in the UI ("derived — the brain reasoned this, no source said it
+  directly"). This is the concrete, honest expression of "it thinks, not just
+  looks up," and it costs almost nothing because the traversal already exists.
+
+### 5.5 Config
 
 - `LEARN_THRESHOLD` (int, default 3) — min strong associations to answer
   without learning.
@@ -127,6 +150,11 @@ is **r3f v8 for React 18.**)
 - **Shape (real anatomical):** load a properly-licensed human-brain GLTF/GLB
   and use `MeshSurfaceSampler` to scatter N neuron points across its true
   surface. See §6.3 for model sourcing (gated on user approval).
+- **Region-clustered placement:** map each concept to a brain region (stable
+  hash of the concept, or a light category heuristic) and bias its neuron
+  toward that lobe's surface area, using the region centroids from the
+  research. Effect: different questions light up different *areas* of the
+  brain, so it reads as a living organ rather than a uniform dust cloud.
 - **Neurons:** `THREE.Points` + one `BufferGeometry` + custom additive glow
   `ShaderMaterial` — 50k–100k points in a single draw call. Per-point
   attributes: position, `spawnTime`, size, activation.
@@ -155,11 +183,13 @@ cancels the stream on unmount or a new query.
 
 ### 6.3 Brain model sourcing (HARD GATE — user approval before download)
 
-The real-anatomy option needs one 3D model file. Candidates (CC-licensed):
-Z-Anatomy (CC-BY-SA), BodyParts3D (CC-BY-SA), or a CC0 Sketchfab brain.
-Before downloading anything, I will present the **exact file, source URL,
-license, and size** and get explicit user approval (per download-safety rule).
-The file lives under `client/public/models/` and is loaded at runtime.
+The real-anatomy option needs one 3D model file. **Prefer a CC0 model** (no
+attribution/share-alike obligation) over CC-BY-SA (Z-Anatomy, BodyParts3D),
+which would impose share-alike on the app. Before downloading anything, I will
+present the **exact file, source URL, license, and size** and get explicit user
+approval (per download-safety rule). The file lives under
+`client/public/models/` and is loaded at runtime. Until it is approved, the
+frontend renders the procedural-fallback brain so the build is never blocked.
 
 ## 7. Data Flow (learn-on-demand, unknown concept)
 
@@ -183,8 +213,11 @@ The file lives under `client/public/models/` and is loaded at runtime.
 ## 9. Testing
 
 - `test_brain_learn.py` — `apply_to_graph` writes concepts/edges/G² correctly
-  (against a test Neo4j or a mocked session); `learn_concept` maps term→URL and
-  returns counts (fetch mocked).
+  (against a test Neo4j or a mocked session); `resolve_wikipedia_title` picks
+  the right article (search API mocked, incl. plural/disambiguation cases);
+  `learn_concept` resolves + returns counts (fetch mocked).
+- `test_brain_inference.py` — `infer_links` returns only genuine 2-hop derived
+  links (excludes direct neighbours), ranked by combined edge strength.
 - `test_crawler_uses_learn_engine.py` — `crawl_one_page` still produces the same
   graph writes after refactor (regression guard).
 - `test_brain_ask_endpoint.py` — SSE stream emits the expected stage sequence
