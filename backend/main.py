@@ -4025,7 +4025,11 @@ async def brain_ask(
         # becomes reading for later. Selection is pure and already done; the
         # queueing runs AFTER the answer has been streamed, so it adds no
         # latency and the answer itself still reached no network.
-        curious_about = brain_curiosity.select_gaps(answer)
+        # What past curiosity actually taught the brain decides what it bothers
+        # being curious about now. A kind of gap whose reads have reliably
+        # yielded nothing stops being queued.
+        effectiveness = await brain_curiosity.measure_effectiveness()
+        curious_about = brain_curiosity.select_gaps(answer, effectiveness=effectiveness)
         if curious_about:
             try:
                 async with httpx.AsyncClient(timeout=15, headers=brain_learn.UA_HEADERS) as client:
@@ -4034,7 +4038,13 @@ async def brain_ask(
                     )
                 if queued:
                     yield {"data": json.dumps({
-                        "stage": "curious", "concepts": curious_about, "queued": queued,
+                        "stage": "curious",
+                        "concepts": [c for c, _ in curious_about],
+                        # Why each one is being read, and how that kind of bet
+                        # has paid off before.
+                        "reasons": {c: r for c, r in curious_about},
+                        "effectiveness": effectiveness,
+                        "queued": queued,
                     })}
             except Exception:
                 # Curiosity is a bonus, never a reason to break a good answer.

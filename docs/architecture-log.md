@@ -4,6 +4,63 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-05 (session 7) — The curiosity loop now closes on itself
+
+**Status:** implemented and tested. 201 backend tests pass.
+
+### The last open loop
+
+Curiosity detected gaps, queued reading, and never checked whether reading
+helped. That is an open loop: the brain would go on making a losing bet
+indefinitely, because nothing could tell a bet that pays from one that does not.
+
+Three kinds of bet are now kept apart, because they are genuinely different
+wagers with different odds: the graph had nothing on a concept, the brain
+inferred something and wants to verify it, or a concept was named on thin
+evidence. `measure_effectiveness` reports, per kind, how many reads completed,
+how many taught the brain anything, and the resulting rate. `select_gaps` then
+stops acting on a kind whose reads have reliably yielded nothing.
+
+Two safeguards, both tested. A kind with too little history is always kept, so
+a new one is never killed by one bad read. And with no measurements at all the
+behaviour is exactly as before, so an unmeasurable loop falls back to acting
+rather than stopping.
+
+### No new table, and no touching someone else's work in progress
+
+The obvious design was an outcomes table. Rejected on two grounds. The data
+already exists: the crawler carries a frontier entry's `source_type` through to
+its visited-page record, so every completed read is on file with how many
+sentences it produced. Appending the reason after a colon
+(`curiosity:derived`) makes that record attributable, and the measurement
+becomes a read over history the pipeline was already keeping.
+
+The second reason is practical and worth writing down. Adding a model means
+editing `backend/models.py` and `backend/database.py`, both of which carry
+Sanju's uncommitted work. Committing a schema change would have meant
+committing their unfinished work alongside it. A design that needs no schema
+change avoided the conflict entirely.
+
+### Correction to an earlier expectation
+
+Partitioning graph edges by sense is **rejected, not pending** — recorded here
+because it was still being tracked as upcoming. Cluster identity is not stable
+as contexts accumulate, so an edge tagged today can denote a different sense
+after more reading, and edges already written have no migration. Answer-time
+filtering (session 5) reads the current clustering every time and is therefore
+always consistent with what the brain currently believes.
+
+### Open questions
+
+1. `measure_effectiveness` runs on every ask. It is one grouped aggregate over
+   a small table, but if the visited-page table grows large it should be cached
+   for a few minutes rather than recomputed per request.
+2. The thresholds — what counts as a useful read, how much history a reason
+   needs — are reasoned defaults, not calibrated against real crawl data the
+   way the sense threshold was. They should be revisited once the crawler has
+   run long enough to produce a real distribution.
+3. Wikipedia's table-of-contents text still reads as prose.
+
 ## 2026-09-05 (session 6) — Wikipedia access fixed by compliance; discovery hardened on real pages
 
 **Status:** 195 backend tests pass.
