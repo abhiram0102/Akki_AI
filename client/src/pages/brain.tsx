@@ -375,6 +375,7 @@ export default function BrainPage() {
       case "done":
         if (askAborting) return "";
         if (askAnswer?.note) return askAnswer.note;
+        if (askAnswer?.answer?.summary) return askAnswer.answer.summary;
         if (askAnswer) return `${askAnswer.associations.length} associations, ${askAnswer.inferred.length} inferred links`;
         return "";
       case "error": return "The field went quiet — check your connection.";

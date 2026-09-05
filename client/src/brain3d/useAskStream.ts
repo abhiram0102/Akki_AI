@@ -5,18 +5,34 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // format `sse_starlette.EventSourceResponse` emits: `data: <json>\n\n` per
 // event, no `event:` field. The exact stage payloads, in order, are:
 //
-//   1. {stage:"thinking", concept}
+//   1. {stage:"thinking", concept, plan:{intent, topics, wh}}
 //   2. {stage:"gap", concept}                         — only if unknown concept
 //   3. {stage:"learning", source}                      — only if gap
 //   4. {stage:"grew", new_concepts, new_edges}          — only if gap, learn succeeded
-//   5. {stage:"answer", concept, associations:[], inferred:[], note}  — either
-//      the normal-path answer, or (if gap + learn failed) an empty answer
-//      carrying a "couldn't learn that one" note, followed immediately by done
+//   5. {stage:"answer", concept, associations:[], inferred:[], note, answer:{...}}
+//      — either the normal-path answer (`answer` present), or (if gap + learn
+//      failed) an empty answer carrying a "couldn't learn that one" note and
+//      NO `answer` object, followed immediately by done
 //   6. {stage:"done"}
 //
 // So a client sees one of three shapes: thinking→answer→done (known concept),
 // thinking→gap→learning→grew→answer→done (learned successfully), or
 // thinking→gap→learning→answer(empty+note)→done (learn failed).
+//
+// `plan` (on "thinking") is `backend/services/brain_query.py`'s parsed
+// QueryPlan — the question run through spaCy (no LLM) and resolved to an
+// intent (DEFINE/CAUSE/EFFECT/RELATE/EXPLORE) plus the topics it names.
+// `answer` (on "answer", when the query succeeded) is
+// `backend/services/brain_answer.py`'s composed Function-7 answer:
+// `dependsOn`/`produces`/`convergences`/`derived` (the same kind of evidence
+// as `associations`/`inferred`, just oriented per the intent — e.g. `dependsOn`
+// reads the graph's in-edges, something nothing read before this), a
+// deterministically templated `summary` sentence, an unprompted `observation`,
+// an honest `gap`, a `confidence` score, and `provenance` (source URLs
+// actually read). Every clause in it is composed from real graph edges —
+// nothing in the answer path is LLM-generated. `associations` and `inferred`
+// are unchanged and still come first in the payload, so any consumer that
+// ignores `plan`/`answer` behaves exactly as before.
 //
 // Design choices (documented per the task brief's latitude grant):
 //
@@ -127,11 +143,45 @@ export interface AskInferred {
   derived: true;
 }
 
+/** The question, understood — `backend/services/brain_query.py`'s QueryPlan. */
+export interface AskPlan {
+  intent: string;
+  topics: string[];
+  wh: string | null;
+}
+
+/** One convergence point (where otherwise-unrelated topics meet). */
+export interface AskConvergence {
+  concept: string;
+  [key: string]: unknown;
+}
+
+/**
+ * `backend/services/brain_answer.py`'s composed Function-7 answer — see the
+ * file header for what each field means. Absent from `AskAnswer` only on the
+ * "couldn't learn that one" empty-answer path (there's nothing to compose).
+ */
+export interface AskComposedAnswer {
+  intent: string;
+  topics: string[];
+  wh: string | null;
+  dependsOn: AskAssociation[];
+  produces: AskAssociation[];
+  convergences: AskConvergence[];
+  derived: AskInferred[];
+  summary: string;
+  observation: string | null;
+  gap: string | null;
+  confidence: number;
+  provenance: string[];
+}
+
 export interface AskAnswer {
   concept: string;
   associations: AskAssociation[];
   inferred: AskInferred[];
   note?: string;
+  answer?: AskComposedAnswer;
 }
 
 /** Counts from a `grew` event — see the "learnedNodes" design note above. */
@@ -143,6 +193,7 @@ export interface AskGrew {
 export interface UseAskStreamResult {
   ask(concept: string): void;
   stage: AskStage;
+  plan: AskPlan | null;
   answer: AskAnswer | null;
   learnedNodes: AskGrew | null;
   aborting: boolean;
@@ -150,6 +201,7 @@ export interface UseAskStreamResult {
 
 export function useAskStream(): UseAskStreamResult {
   const [stage, setStage] = useState<AskStage>("idle");
+  const [plan, setPlan] = useState<AskPlan | null>(null);
   const [answer, setAnswer] = useState<AskAnswer | null>(null);
   const [learnedNodes, setLearnedNodes] = useState<AskGrew | null>(null);
   const [aborting, setAborting] = useState(false);
@@ -197,6 +249,7 @@ export function useAskStream(): UseAskStreamResult {
       controllerRef.current = controller;
 
       setStage("thinking");
+      setPlan(null);
       setAnswer(null);
       setLearnedNodes(null);
 
@@ -250,6 +303,9 @@ export function useAskStream(): UseAskStreamResult {
         const s = evt.stage;
         if (s === "thinking" || s === "gap" || s === "learning") {
           setStage(s);
+          if (s === "thinking" && evt.plan && typeof evt.plan === "object") {
+            setPlan(evt.plan as AskPlan);
+          }
         } else if (s === "grew") {
           setStage("grew");
           setLearnedNodes({
@@ -263,6 +319,7 @@ export function useAskStream(): UseAskStreamResult {
             associations: Array.isArray(evt.associations) ? (evt.associations as AskAssociation[]) : [],
             inferred: Array.isArray(evt.inferred) ? (evt.inferred as AskInferred[]) : [],
             note: typeof evt.note === "string" ? evt.note : undefined,
+            answer: evt.answer && typeof evt.answer === "object" ? (evt.answer as AskComposedAnswer) : undefined,
           });
         } else if (s === "done") {
           setStage("done");
@@ -274,5 +331,5 @@ export function useAskStream(): UseAskStreamResult {
     [abortInFlight, markAbortSettled]
   );
 
-  return { ask, stage, answer, learnedNodes, aborting };
+  return { ask, stage, plan, answer, learnedNodes, aborting };
 }
