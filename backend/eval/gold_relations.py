@@ -57,6 +57,31 @@ GOLD: list[tuple[str, set[tuple[str, str]]]] = [
     ("Antibodies neutralise pathogens.", {("antibody", "pathogen")}),
     ("Enzymes catalyse reactions.", {("enzyme", "reaction")}),
 
+    # ── Irregular plural morphology: "data" must not become "datum" ─────────
+    # Loanword false friends where spaCy's classical singular is rare/wrong
+    # in ordinary prose (Task B). Contrast case included so the exception
+    # list is proven narrow rather than "keep every plural as-is".
+    ("Advertisers target media.", {("advertiser", "media")}),
+    ("Engineers multiply matrices.", {("engineer", "matrix")}),
+
+    # ── Passive voice ────────────────────────────────────────────────────────
+    # A passive sentence must yield the same (cause, effect) pair as its
+    # active-voice paraphrase. Found missing/backwards by real-text sampling
+    # (Task C): the by-agent uses spaCy's `agent` dependency label, not
+    # `prep`, and naively treating `nsubjpass` like an ordinary subject gets
+    # the direction backwards once the by-agent is found at all.
+    ("Heat is caused by friction.", {("friction", "heat")}),
+    ("Sunlight is required by photosynthesis.", {("sunlight", "photosynthesis")}),
+    ("Data is protected by encryption.", {("encryption", "data")}),
+
+    # ── Negation ─────────────────────────────────────────────────────────────
+    # A negated verb asserts the ABSENCE of a relationship; extracting one
+    # anyway would record the opposite of what the sentence says. Found by
+    # real-text sampling (Task C): "the cyanobacteria did not generate
+    # oxygen" was yielding (cyanobacteria, oxygen).
+    ("The firewall does not block traffic.", set()),
+    ("Vaccines never cause autism.", set()),
+
     # ── Sentences that must yield nothing ───────────────────────────────────
     # Copular and light verbs carry no relationship. A graph full of "X is Y"
     # is a graph that cannot answer anything.

@@ -48,6 +48,22 @@ def test_relation_quality_has_not_regressed(results):
     )
 
 
+def test_real_text_quality_has_not_regressed(results):
+    """Same guard, over `real_text_gold.REAL_TEXT_GOLD` (sampled from the
+    real corpus, not written for the purpose -- see that module's
+    docstring). This is the number that should be trusted over the
+    hand-labelled one above when the two disagree, precisely because it
+    was not hand-picked to flatter the extractor."""
+    now = results["realTextQuality"]
+    before = BASELINE["realTextQuality"]
+    assert now["precision"] >= before["precision"] - _QUALITY_TOLERANCE, (
+        f"real-text precision fell from {before['precision']} to {now['precision']}"
+    )
+    assert now["recall"] >= before["recall"] - _QUALITY_TOLERANCE, (
+        f"real-text recall fell from {before['recall']} to {now['recall']}"
+    )
+
+
 def test_every_page_still_yields_structure(results):
     """A page that stops producing text or sentences means discovery broke on
     a real document, which no unit test on synthetic input would catch."""

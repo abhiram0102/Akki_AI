@@ -51,38 +51,23 @@
       "relations": 1
     },
     "stanford_consciousness": {
-      "concepts": 103,
-      "relations": 57
+      "concepts": 95,
+      "relations": 51
     },
     "wikipedia_photosynthesis": {
-      "concepts": 127,
-      "relations": 88
+      "concepts": 138,
+      "relations": 97
     }
   },
   "relationQuality": {
-    "cases": 15,
-    "truePositives": 9,
-    "falsePositives": 1,
-    "falseNegatives": 2,
-    "precision": 0.9,
-    "recall": 0.8182,
-    "f1": 0.8571,
+    "cases": 22,
+    "truePositives": 15,
+    "falsePositives": 0,
+    "falseNegatives": 1,
+    "precision": 1.0,
+    "recall": 0.9375,
+    "f1": 0.9677,
     "disagreements": [
-      {
-        "sentence": "Encryption protects data.",
-        "expected": [
-          [
-            "encryption",
-            "data"
-          ]
-        ],
-        "got": [
-          [
-            "encryption",
-            "datum"
-          ]
-        ]
-      },
       {
         "sentence": "Enzymes catalyse reactions.",
         "expected": [
@@ -92,6 +77,65 @@
           ]
         ],
         "got": []
+      }
+    ]
+  },
+  "realTextQuality": {
+    "cases": 45,
+    "truePositives": 4,
+    "falsePositives": 4,
+    "falseNegatives": 0,
+    "precision": 0.5,
+    "recall": 1.0,
+    "f1": 0.6667,
+    "disagreements": [
+      {
+        "page": "arxiv_attention",
+        "index": 2,
+        "sentence": "Full-text links: Access Paper: View a PDF of the paper titled Attention Is All You Need, by Ashish Vaswani and 7 other authors View PDF HTML (",
+        "expected": [],
+        "got": [
+          [
+            "access paper",
+            "pdf"
+          ]
+        ]
+      },
+      {
+        "page": "stanford_consciousness",
+        "index": 81,
+        "sentence": ") One's perception of the Merlot one is drinking or of the fabric one is examining counts as a conscious mental state in this sense because it involves various sensory qualia, e.",
+        "expected": [],
+        "got": [
+          [
+            "perception",
+            "fabric"
+          ]
+        ]
+      },
+      {
+        "page": "stanford_consciousness",
+        "index": 118,
+        "sentence": "However, one should not assume that conceptual plurality implies referential divergence.",
+        "expected": [],
+        "got": [
+          [
+            "conceptual plurality",
+            "referential divergence"
+          ]
+        ]
+      },
+      {
+        "page": "wikipedia_photosynthesis",
+        "index": 208,
+        "sentence": "[ 84 ] [ 85 ] Because the Earth's atmosphere contained almost no oxygen during the estimated development of photosynthesis, it is believed that the first photosynthetic cyanobacteria did not generate oxygen.",
+        "expected": [],
+        "got": [
+          [
+            "earth atmosphere",
+            "oxygen"
+          ]
+        ]
       }
     ]
   }

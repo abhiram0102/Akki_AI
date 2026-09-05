@@ -4,6 +4,106 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 9) — Both session-8 defects fixed; the evaluation replaced
+
+**Status:** implemented and tested. 219 backend tests pass. Full
+measurement detail (sampling strategy, inter-annotator agreement,
+precision/recall trend) is in the new `docs/evaluation-log.md` — this entry
+is the design summary.
+
+### The two named defects
+
+**"data" → "datum".** Not a naive stemmer (there wasn't one to replace —
+`brain_nlp` already used spaCy's real morphological lemmatiser). Measured
+~40 candidate irregular plurals over realistic sentences and found the
+lemmatiser gets almost all of them right (matrix/matrices, thesis/theses,
+child/children, mouse/mice, ...) — consolidating a plural onto its singular
+is the *desired* behaviour there. Only five Latin/Greek loanwords
+measurably misfire, where the "correct" classical singular is rare/archaic
+or names a different sense: data, media, criteria, phenomena, trivia. Fixed
+with a 5-word exception list keyed on the surface word the writer used
+(`brain_nlp._IRREGULAR_PLURAL_SURFACE`), so a genuine singular use ("a
+growth medium") is untouched.
+
+**"Enzymes catalyse reactions" → nothing.** Confirmed the session-8
+diagnosis: `en_core_web_sm`'s tagger mistags "catalyse"/"catalyze" as a
+NOUN in a determiner-less, bare-plural-subject, present-tense construction.
+Measured `sm` against `md` and `lg` on the gold set, corpus yield, load
+time and peak memory. `md` does **not** fix it (same tagging error as
+`sm`); only `lg` does, at 5.2x the memory and ~2.5x the per-sentence
+latency, in a request path. **Not switched** — flagged to ammu/god as an
+architectural fork with the numbers, per the assignment's own instruction
+not to just swap it. See evaluation-log for the full table and reasoning.
+
+### Two more defects, found (and fixed) via real-text sampling
+
+Sampling real sentences for Task C surfaced two patterns no hand-written
+test happened to cover:
+
+- **Negation.** "The cyanobacteria did not generate oxygen" was extracted
+  as if asserted. Fixed by reading spaCy's existing `neg` dependency label
+  on the relation verb (`brain_nlp._is_negated`) — no new lexicon.
+  Deliberately scoped to verb-local negation; negation on a governing
+  clause and quantifier negation via a determiner ("almost no X") are named
+  limitations, not fixed.
+- **Passive voice with an expressed agent.** "Heat is caused by friction"
+  produced nothing (the by-agent is spaCy's `agent` dependency label, not
+  `prep`) and, once that's fixed naively, would have gotten the direction
+  backwards (`nsubjpass` is the patient, not the agent).
+  `brain_nlp._true_subject_object` now swaps roles when an agent is
+  expressed; passives without one are unaffected.
+
+### The evaluation, replaced
+
+Session 8's 0.90-precision figure came from 15 sentences this project
+wrote and labelled itself — a regression tripwire, not a measurement, and
+it said so honestly at the time. This session: sampled 45 real sentences
+from the stored corpus (stratified equally across its 3 pages, no quality
+filtering), had an independent second annotator blind-label the same set,
+computed Cohen's kappa (0.63, "substantial" agreement) between the two, and
+now reports precision **and** recall against that held-out sample
+separately from the hand-written set. The honest result: 0.50 precision on
+real text versus 1.00 on the hand-written set — worse, as it should
+plausibly be, with every false positive traced to a specific named cause
+rather than left as unlabelled noise. Full detail: `docs/evaluation-log.md`.
+
+### Rejected: fixing every gap the real-text sample found
+
+The sample also surfaced governing-clause negation, quantifier negation,
+and discovery-layer fragments (nav chrome, a citation-stripping remnant)
+that confuse the dependency parser into inventing relations from
+non-clauses. None of these were fixed this session — the first two are
+harder problems than a well-scoped fix (full negation-scope resolution),
+and the third is not this file's bug to fix (`brain_nlp` is doing the right
+thing with corrupted input it was handed; the fix, if any, belongs in
+`brain_discovery`'s prose/fragment filtering). Named in evaluation-log
+rather than either silently left out or hastily patched.
+
+### Word sense induction benchmarks — checked, not adopted
+
+SemEval WSI tasks (Fuzzy B-Cubed / V-Measure against sense-labelled
+corpora) are the established protocol and would apply to
+`brain_meaning.py` in principle, but adopting one needs sense-labelled data
+this project doesn't have, and `brain_meaning.py` itself was out of this
+session's scope (`brain_nlp.py` and `backend/eval/*` only). Flagged as an
+open fork for whoever next works on that file, not decided here.
+
+### Open questions
+
+1. Task A's model-size fork (`sm` vs `lg`) needs a decision from ammu/god,
+   not another session assuming an answer.
+2. Anaphora resolution: the second annotator's disagreements were entirely
+   about resolving a relative pronoun ("which"/"that") back to its
+   antecedent. The current pipeline doesn't attempt this anywhere. Worth a
+   deliberate decision (in scope or explicitly out) rather than leaving it
+   as an accidental gap.
+3. Negation-scope across clause boundaries, and quantifier negation via a
+   determiner, remain unfixed — named in evaluation-log, not silently
+   dropped.
+4. Growing the stored eval corpus (more pages, more source types) would
+   let a future Task-C-style sample grow past 45 sentences / 3 pages
+   without re-deriving a sampling strategy from scratch.
+
 ## 2026-09-06 (session 8) — An evaluation harness, and the first two defects it found
 
 **Status:** implemented and tested. 206 backend tests pass.

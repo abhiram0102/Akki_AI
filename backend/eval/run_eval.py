@@ -153,11 +153,59 @@ def measure_relation_quality() -> dict:
     }
 
 
+def measure_real_text_quality() -> dict:
+    """Precision, recall and F1 against `real_text_gold.REAL_TEXT_GOLD` --
+    45 sentences sampled from the stored corpus itself (not written for the
+    purpose) and hand-labelled, with a second independent annotator's labels
+    recorded alongside for inter-annotator agreement. See that module's
+    docstring for the sampling strategy, the IAA computation, and an honest
+    account of where the two annotators disagreed and why.
+
+    Reported separately from `measure_relation_quality()` deliberately: that
+    one is a regression tripwire over hand-written examples designed to
+    exercise one pattern each, this one is closer to a real measurement of
+    quality on text nobody hand-picked. They should not be averaged together.
+    """
+    from backend.eval.real_text_gold import REAL_TEXT_GOLD
+    from backend.services import brain_nlp
+
+    true_positives = false_positives = false_negatives = 0
+    misses = []
+    for page, index, sentence, expected in REAL_TEXT_GOLD:
+        try:
+            got = set(brain_nlp.extract_dependencies(sentence))
+        except Exception:
+            got = set()
+        true_positives += len(got & expected)
+        false_positives += len(got - expected)
+        false_negatives += len(expected - got)
+        if got != expected:
+            misses.append({
+                "page": page, "index": index, "sentence": sentence,
+                "expected": sorted(expected), "got": sorted(got),
+            })
+
+    precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) else 0.0
+    recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    return {
+        "cases": len(REAL_TEXT_GOLD),
+        "truePositives": true_positives,
+        "falsePositives": false_positives,
+        "falseNegatives": false_negatives,
+        "precision": round(precision, 4),
+        "recall": round(recall, 4),
+        "f1": round(f1, 4),
+        "disagreements": misses,
+    }
+
+
 def run() -> dict:
     return {
         "discovery": measure_discovery(),
         "extraction": measure_extraction(),
         "relationQuality": measure_relation_quality(),
+        "realTextQuality": measure_real_text_quality(),
     }
 
 
@@ -175,7 +223,7 @@ def _report(results: dict) -> str:
         )
 
     q = results["relationQuality"]
-    lines += ["", "Relation extraction against hand-labelled sentences", ""]
+    lines += ["", "Relation extraction against hand-labelled sentences (regression tripwire)", ""]
     lines.append(f"  cases      {q['cases']}")
     lines.append(f"  precision  {q['precision']}")
     lines.append(f"  recall     {q['recall']}")
@@ -184,6 +232,19 @@ def _report(results: dict) -> str:
         lines += ["", f"  {len(q['disagreements'])} sentence(s) disagreed with the labels:"]
         for miss in q["disagreements"]:
             lines.append(f"    {miss['sentence']}")
+            lines.append(f"      expected {miss['expected']}")
+            lines.append(f"      got      {miss['got']}")
+
+    r = results["realTextQuality"]
+    lines += ["", "Relation extraction against sentences sampled from the real corpus", ""]
+    lines.append(f"  cases      {r['cases']}")
+    lines.append(f"  precision  {r['precision']}")
+    lines.append(f"  recall     {r['recall']}")
+    lines.append(f"  f1         {r['f1']}")
+    if r["disagreements"]:
+        lines += ["", f"  {len(r['disagreements'])} sentence(s) disagreed with the labels:"]
+        for miss in r["disagreements"]:
+            lines.append(f"    [{miss['page']}#{miss['index']}] {miss['sentence'][:80]}")
             lines.append(f"      expected {miss['expected']}")
             lines.append(f"      got      {miss['got']}")
     return "\n".join(lines)
