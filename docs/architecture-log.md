@@ -4,6 +4,78 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 16) -- The crawler could not start. Commit 8a2cdda
+
+**Status:** fixed, deployed, crawler verified running on current code.
+
+### The bug
+
+`main()` installs SIGINT and SIGTERM handlers pointing at `_signal_handler`,
+and the main loop runs `while _running`. Both names had been dropped from the
+module in `ea2565d` while **every use of them stayed**. The crawler raised
+`NameError` on the first line of startup and **could not run at all from
+source**.
+
+It went unnoticed for eighteen hours because the running container had been
+started from an older image and never restarted, so it kept executing code
+that still had those names. The fault appears only on a restart -- which is
+when nobody is watching, and exactly when a crawl is expected to resume by
+itself. A machine reboot or a container eviction would have silently ended the
+crawl.
+
+No test caught it because nothing in the suite imports `main()`. There is now
+one that asserts the names startup depends on exist and that a termination
+signal flips the flag.
+
+### How it was found, which is the part worth keeping
+
+Only by restarting the crawler to pick up the adaptive-reading change. The
+containers **bake code into the image** -- no volume mount -- so the running
+crawler was executing code from before sessions 12, 13, 14 and 15. Every fix
+those sessions made was inert in production, and nothing said so.
+
+That is worth stating plainly: for four sessions the measured improvements
+were real in the test suite and absent from the running system. Checking
+whether deployed code matches source is now part of finishing work, not an
+afterthought.
+
+### Deployment facts, recorded so the next session does not rediscover them
+
+    docker compose build brain-crawler     # non-destructive, leaves the container alone
+    docker compose up -d brain-crawler     # crawl state lives in Postgres, so it resumes
+
+### Also measured this session, not yet acted on
+
+The frontier is selected with `select(BrainFrontier).limit(BATCH_SIZE)` and
+**no ORDER BY**, so crawl order is whatever Postgres's physical row layout
+happens to give. It is neither breadth-first nor depth-first but undefined,
+and the oldest queued-but-unvisited URL dates from the crawl's first hour,
+twenty hours ago.
+
+This matters more than it looks. The frontier holds 437,285 URLs and grows
+faster than it drains (~1,500 pages/hour), so **it will never be exhausted** --
+which makes selection order the thing that decides everything the brain ever
+learns. Ordering by `discovered_at` would make the crawl breadth-first, which
+is the property convergence detection wants: many branches explored at similar
+depth rather than one tunnel.
+
+The obvious grouping key does not work, and this was checked rather than
+assumed: `brain_frontier.concept` has 438,655 distinct values across 438,837
+rows, so it is effectively unique per URL and cannot serve as a neighbourhood
+label. Ordering by discovery time needs an index on a 437k-row table, which is
+a storage change and is being flagged rather than made unilaterally.
+
+### Open questions
+
+1. Frontier ordering, above. The fix is small; the schema change it needs is
+   the part worth a second opinion.
+2. Whether adaptive reading changes the crawl rate in production. It raises
+   per-page parsing on productive pages, and parsing is the bottleneck.
+3. Every visited page is still Wikipedia -- a monoculture for a mechanism whose
+   premise is "unrelated starting branches".
+
+---
+
 ## 2026-09-06 (session 15) -- The crawler was discarding 20% of everything it read. Commit 39cd11f
 
 **Status:** built and measured against the live crawl. 247 backend tests pass.
