@@ -47,6 +47,64 @@ MAX_ATTEMPTS = 3
 PRUNE_EVERY_N_PAGES = 200
 BATCH_SIZE = 20
 
+
+# How much of a page to read. Sentences are parsed in blocks, and reading stops
+# when a block stops producing -- the page itself says when it is finished,
+# rather than a fixed count deciding for it.
+#
+# A fixed cap was measured against two real pages and is wrong on one of them,
+# because it assumes information is front-loaded, which is an assumption about
+# document layout and not a property of documents. Relations per sentence, by
+# hundred-sentence band:
+#
+#   Wikipedia article:  0.54  0.44  0.31  0.05  0.02  0.09
+#   Encyclopedia essay: 0.26  0.27  0.39  0.45  0.26  0.01  0.00
+#
+# The article is front-loaded and a cap at 200 costs it almost nothing. The
+# essay's two RICHEST bands are the two immediately after 200, so the same cap
+# discards the best part of it. Both collapse to near zero eventually -- at
+# different places -- which is the signal worth acting on.
+_BLOCK = 50
+# Always read this much before judging: the opening of a page is not always
+# representative, and the essay above would have been cut short by an early
+# quiet stretch.
+_MIN_READ = 200
+# A hard ceiling, so a pathological page cannot consume the whole crawl.
+_MAX_READ = 1200
+# Stop when a block yields less than this share of the best block seen so far.
+# The same share-of-best rule already used to pick sentence terminators.
+_YIELD_SHARE = 0.2
+
+
+def _read_adaptively(sentences: list[str], extract) -> tuple[list, int]:
+    """Parse blocks of sentences while the page is still producing relations.
+
+    Returns the pairs found and how many sentences were actually read, so the
+    caller can record what the page cost as well as what it gave.
+    """
+    pairs: list = []
+    best = 0.0
+    read = 0
+    for start in range(0, min(len(sentences), _MAX_READ), _BLOCK):
+        block = sentences[start:start + _BLOCK]
+        if not block:
+            break
+        found = []
+        for sentence in block:
+            try:
+                found.extend(extract(sentence))
+            except Exception:
+                continue
+        pairs.extend(found)
+        read += len(block)
+
+        yield_rate = len(found) / len(block)
+        best = max(best, yield_rate)
+        if read >= _MIN_READ and yield_rate < best * _YIELD_SHARE:
+            break
+    return pairs, read
+
+
 async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: RateLimiter,
                           neo4j_driver, pg_session) -> int | None:
     """Fetch, extract, and persist one frontier entry.
@@ -80,12 +138,7 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
     # grammatical floor for extract_dependencies to find a subject-verb-object
     # triple ("Fire causes heat" is exactly 3).
     sentences = [s for s in sentences if len(s.split()) >= 3]
-    pairs: list[tuple[str, str]] = []
-    for sentence in sentences[:200]:  # cap per-page NLP cost
-        try:
-            pairs.extend(extract_dependencies(sentence))
-        except Exception:
-            continue
+    pairs, sentences_read = _read_adaptively(sentences, extract_dependencies)
 
     word_freq: Counter = Counter()
     edge_counts: Counter = Counter()
@@ -100,7 +153,7 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
     await pg_session.execute(
         pg_insert(BrainVisitedPage).values(
             url=url, concept=concept, source_type=source_type,
-            sentences_learned=len(sentences),
+            sentences_learned=sentences_read,
         ).on_conflict_do_nothing()
     )
     await pg_session.execute(delete(BrainFrontier).where(BrainFrontier.url == url))
@@ -121,7 +174,7 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
         )
 
     await pg_session.commit()
-    return len(sentences)
+    return sentences_read
 
 
 async def _record_failure(pg_session, url: str, source_type: str, error: str) -> None:

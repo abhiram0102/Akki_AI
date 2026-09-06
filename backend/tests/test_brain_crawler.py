@@ -85,3 +85,72 @@ class TestCrawlOnePage:
             )
         # A fetch failure returns None (not raised, not a count).
         assert result is None
+
+
+class TestAdaptiveReading:
+    """How much of a page to read is decided by the page, not by a constant.
+
+    A fixed sentence cap assumes information is front-loaded. Measured on two
+    real pages, that is true of one and false of the other: a Wikipedia
+    article's relations-per-sentence runs 0.54, 0.44, 0.31, 0.05 by
+    hundred-sentence band, while an encyclopedia essay runs 0.26, 0.27, 0.39,
+    0.45 -- its two richest bands sit just past where a 200-sentence cap would
+    have stopped.
+    """
+
+    @staticmethod
+    def _extract_from(yields: dict):
+        """An extractor whose productivity varies by sentence index, so a test
+        can describe a page's shape directly."""
+        def extract(sentence):
+            index = int(sentence.split()[-1])
+            band = index // 100
+            return [("a", "b")] * yields.get(band, 0)
+        return extract
+
+    @staticmethod
+    def _page(count: int):
+        return [f"sentence number {i}" for i in range(count)]
+
+    def test_reading_stops_when_a_page_stops_producing(self):
+        """The Wikipedia shape: rich opening, then references and see-also,
+        which cost NLP time and yield nothing."""
+        extract = self._extract_from({0: 5, 1: 4, 2: 3, 3: 0, 4: 0, 5: 0})
+        pairs, read = brain_crawler._read_adaptively(self._page(600), extract)
+        assert read < 600, "read the whole page including the dead tail"
+        assert read >= brain_crawler._MIN_READ
+
+    def test_reading_continues_while_a_page_is_still_producing(self):
+        """The essay shape. This is the case a fixed cap gets wrong: the page
+        is at its most productive exactly where the old cap stopped."""
+        extract = self._extract_from({0: 2, 1: 2, 2: 4, 3: 5, 4: 2, 5: 0})
+        pairs, read = brain_crawler._read_adaptively(self._page(600), extract)
+        assert read > 200, (
+            f"stopped at {read} sentences, discarding the most productive part "
+            "of the page"
+        )
+        assert len(pairs) > 200 * 2, "gathered no more than a 200-sentence cap would"
+
+    def test_a_quiet_opening_does_not_end_the_reading(self):
+        """A page whose first block happens to be thin must not be abandoned
+        on that evidence -- which is what `_MIN_READ` protects against."""
+        extract = self._extract_from({0: 0, 1: 3, 2: 4, 3: 4})
+        pairs, read = brain_crawler._read_adaptively(self._page(400), extract)
+        assert read >= brain_crawler._MIN_READ
+        assert pairs, "abandoned a productive page because it opened quietly"
+
+    def test_a_page_that_never_stops_producing_is_still_bounded(self):
+        """One page cannot be allowed to consume the whole crawl."""
+        extract = self._extract_from({i: 5 for i in range(40)})
+        _, read = brain_crawler._read_adaptively(self._page(4000), extract)
+        assert read <= brain_crawler._MAX_READ
+
+    def test_an_extraction_failure_does_not_abort_the_page(self):
+        """One unparseable sentence must not cost the rest of the page."""
+        def extract(sentence):
+            if sentence.endswith("7"):
+                raise ValueError("unparseable")
+            return [("a", "b")]
+        pairs, read = brain_crawler._read_adaptively(self._page(300), extract)
+        assert read == 300
+        assert len(pairs) == 300 - 30  # every sentence ending in 7
