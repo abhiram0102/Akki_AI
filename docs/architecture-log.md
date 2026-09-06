@@ -4,6 +4,99 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 15) -- The crawler was discarding 20% of everything it read. Commit 39cd11f
+
+**Status:** built and measured against the live crawl. 247 backend tests pass.
+
+### The live crawl, measured
+
+    35,743 pages visited      437,285 queued      153 dead-lettered
+    101 sentences learned per page (max 1,375)    only 11 zero-yield pages
+    49,677 concepts           60,829 edges        180,132 relation instances
+    crawl rate declining: 2,026 -> 1,447 pages/hour over eight hours
+
+The frontier is 12x the size of everything visited and is entirely article
+URLs -- no category or help-page junk. It will never be exhausted, so what the
+crawler chooses to read, and how much of each page, is the whole game.
+
+### What was wrong
+
+`crawl_one_page` read `sentences[:200]` and dropped the rest. Across the crawl
+so far that is **728,218 of 3,613,626 sentences discarded -- 20.2% of
+everything ever read**, from the richest 15% of pages, and discarded *after*
+paying for the fetch, the structure discovery and the sentence split.
+
+A fixed count assumes information is front-loaded. Measured on two real pages,
+that is true of one and false of the other -- relations per sentence, by
+hundred-sentence band:
+
+| page | 0-100 | 100-200 | 200-300 | 300-400 | 400-500 | 500+ |
+|---|---|---|---|---|---|---|
+| Wikipedia article | 0.54 | 0.44 | 0.31 | 0.05 | 0.02 | 0.09 |
+| Encyclopedia essay | 0.26 | 0.27 | **0.39** | **0.45** | 0.26 | 0.01 |
+
+The article is front-loaded, so a cap at 200 costs it little. The essay's two
+richest bands are the two immediately after 200, so the same cap removed the
+best part of it. Both collapse to nothing eventually, at different places.
+That -- not a constant -- is the signal.
+
+### The fix
+
+Sentences are parsed in blocks; reading stops when a block's yield falls below
+a share of the best block seen on that page. Same share-of-best rule already
+used to choose sentence terminators. A minimum read stops a quiet opening from
+ending a page early; a ceiling stops one page consuming the crawl.
+
+| page | strategy | read | relations | nlp sec |
+|---|---|---|---|---|
+| wikipedia | cap 200 | 200 | 98 | 2.64 |
+| wikipedia | **adaptive** | 300 | **129** | 3.73 |
+| essay | cap 200 | 200 | 53 | 3.30 |
+| essay | **adaptive** | 500 | **163** | 6.69 |
+| essay | everything | 712 | 164 | 14.52 |
+
+On the essay this collects 163 of the 164 relations the page contains, for 46%
+of the cost of reading all of it, and three times what the cap collected.
+Better on both axes: 93% more relations overall, and 28.0 relations per second
+of parsing against the cap's 25.4.
+
+### A hypothesis I had to abandon, recorded because the correction is the point
+
+I first read 5.0 relation-instances per page against 98 relations from one
+eval page and inferred a ~20x extraction shortfall. That was wrong twice over.
+Pages average 101 sentences, not a trickle; and the eval corpus is three
+unusually rich articles, so it is not a fair yardstick for a typical crawled
+page. The real gap is ~3.5x and is mostly corpus difference, not a defect. I
+then assumed NLP was cheap and the network was the bottleneck -- also wrong:
+parsing costs ~10ms per sentence, so even the capped 200 sentences took 2.6s
+against a 1.0s politeness interval. **NLP is the bottleneck.** That is exactly
+why the fix spends the budget adaptively instead of just raising the cap.
+
+### Rejected
+
+- **Removing the cap.** Reading everything costs 2.7x the parsing on the essay
+  for one extra relation over adaptive, and on the article it doubles the cost
+  to read bands yielding 0.02 relations per sentence.
+- **Raising the cap to a bigger constant.** Same category error, moved: any
+  constant is right for one page shape and wrong for another.
+
+### Open questions
+
+1. Crawl rate is falling (2,026 -> 1,447 pages/hour over eight hours) and I
+   have not diagnosed why. Adaptive reading raises per-page parsing on
+   productive pages, so this should be watched rather than assumed benign.
+2. `_MIN_READ`, `_MAX_READ` and `_YIELD_SHARE` are reasoned from two pages.
+   Two page shapes is enough to prove a constant cannot serve both; it is not
+   enough to calibrate the thresholds.
+3. Every visited page is Wikipedia. Convergence wants "unrelated starting
+   branches", and a single-site crawl is a monoculture -- unrelated topics on
+   one site still share that site's structure and editorial conventions.
+4. The running crawler is an 18-hour-old image and predates every fix from
+   sessions 12-15. Nothing measured here reflects the current code until it is
+   rebuilt.
+
+---
+
 ## 2026-09-06 (session 14) -- Convergence validated against a real graph for the first time. Commit dd9098e
 
 **Status:** built and measured against live data. 242 backend tests pass.
