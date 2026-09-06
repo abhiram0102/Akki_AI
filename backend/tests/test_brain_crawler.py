@@ -504,3 +504,59 @@ class TestTheCrawlerFeedsTheMeaningLayer:
             brain_crawler._record_page_contexts({"fire": ["fire causes heat"]})
 
         assert recorded == {"fire": ["fire causes heat"]}
+
+
+class TestReadingJudgesTheBrainsOwnClaims:
+    """The falsification loop's crawler end.
+
+    Curiosity queues a derived link -- an inference no source stated -- so the
+    brain can go and check it. Reading the page is only half of that: something
+    has to look at what came back and decide whether the inference held.
+    Without this the brain reads to test itself and then never opens the
+    result.
+    """
+
+    async def test_reading_a_page_adjudicates_claims_about_its_concept(self):
+        judged = {}
+
+        async def _adjudicate(pg, neo, concept):
+            judged["concept"] = concept
+            return {"confirmed": 1, "unsupported": 0}
+
+        entry = {"url": "https://x/nucleus", "concept": "nucleus",
+                 "source_type": "curiosity:derived"}
+
+        with patch.object(brain_crawler, "fetch_structure", AsyncMock(return_value={
+            "text": "Nucleus holds chromosomes.",
+            "sentences": ["Nucleus holds chromosomes."],
+            "links": [], "delimiters": ("<", ">"), "terminators": ["."],
+        })), patch.object(brain_crawler.brain_hypothesis, "adjudicate", _adjudicate):
+            await brain_crawler.crawl_one_page(
+                entry, client=AsyncMock(),
+                robots=AsyncMock(allowed=AsyncMock(return_value=True)),
+                limiter=AsyncMock(wait=AsyncMock()),
+                neo4j_driver=_fake_neo4j_driver(), pg_session=_fake_pg_session(),
+            )
+
+        assert judged["concept"] == "nucleus", \
+            "a page was read to test a claim and nothing checked the result"
+
+    async def test_a_page_still_counts_when_adjudication_fails(self):
+        """Judging is bookkeeping. Losing it must not lose the reading."""
+        async def _boom(pg, neo, concept):
+            raise RuntimeError("adjudication exploded")
+
+        entry = {"url": "https://x/n", "concept": "n", "source_type": "wikipedia"}
+
+        with patch.object(brain_crawler, "fetch_structure", AsyncMock(return_value={
+            "text": "A causes b.", "sentences": ["A causes b."],
+            "links": [], "delimiters": ("<", ">"), "terminators": ["."],
+        })), patch.object(brain_crawler.brain_hypothesis, "adjudicate", _boom):
+            result = await brain_crawler.crawl_one_page(
+                entry, client=AsyncMock(),
+                robots=AsyncMock(allowed=AsyncMock(return_value=True)),
+                limiter=AsyncMock(wait=AsyncMock()),
+                neo4j_driver=_fake_neo4j_driver(), pg_session=_fake_pg_session(),
+            )
+
+        assert result is not None

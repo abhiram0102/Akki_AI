@@ -3951,7 +3951,8 @@ async def brain_ask(
     the web if it doesn't know enough yet, then answer with associations +
     derived (inferred) links — streamed as Server-Sent Events."""
     from sse_starlette.sse import EventSourceResponse
-    from backend.services import brain_service, brain_learn, brain_query, brain_answer, brain_curiosity
+    from backend.services import brain_service, brain_learn, brain_query, brain_answer, brain_curiosity, brain_hypothesis
+    from backend.database import AsyncSessionLocal
     from backend.services.neo4j_service import get_driver
     from starlette.concurrency import run_in_threadpool
     import httpx
@@ -4030,6 +4031,28 @@ async def brain_ask(
         # yielded nothing stops being queued.
         effectiveness = await brain_curiosity.measure_effectiveness()
         curious_about = brain_curiosity.select_gaps(answer, effectiveness=effectiveness)
+
+        # Write down what the brain just claimed on its own authority, BEFORE
+        # it goes to read. A derived link is a 2-hop inference no source
+        # stated -- the answer says so out loud -- and fixing the claim in
+        # advance is what makes the reading a test rather than a story told
+        # afterwards. The crawler judges it once the page has been read.
+        claims = brain_hypothesis.claims_from_answer(answer)
+        if claims:
+            try:
+                async with AsyncSessionLocal() as claim_session:
+                    await brain_hypothesis.ensure_schema(claim_session)
+                    await brain_hypothesis.record(claim_session, claims)
+            except Exception:
+                # The answer is already sent; bookkeeping cannot undo it.
+                pass
+
+        hypothesis_board: dict = {}
+        try:
+            async with AsyncSessionLocal() as board_session:
+                hypothesis_board = await brain_hypothesis.scoreboard(board_session)
+        except Exception:
+            pass
         if curious_about:
             try:
                 async with httpx.AsyncClient(timeout=15, headers=brain_learn.UA_HEADERS) as client:
@@ -4044,6 +4067,11 @@ async def brain_ask(
                         # has paid off before.
                         "reasons": {c: r for c, r in curious_about},
                         "effectiveness": effectiveness,
+                        # How often the brain's own unstated inferences have
+                        # actually been borne out by going and reading. None
+                        # until something has been judged -- "nothing tested
+                        # yet" is not "always wrong".
+                        "hypotheses": hypothesis_board,
                         "queued": queued,
                     })}
             except Exception:

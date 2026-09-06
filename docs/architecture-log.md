@@ -4,6 +4,155 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 25) -- The brain now finds out whether it was wrong. First answer: 0 for 4.
+
+**Status:** built, deployed, verified live with a control. 312 tests pass.
+
+The brain states links no source gave it -- *"one I worked out myself: nucleus,
+reached through electron. Nothing I read said that directly."* Session 3 queued
+those for reading and called it making the loop "self-correcting rather than
+self-confirming". It then scored the reading by how many SENTENCES came back.
+
+So a page returning 300 sentences about something unrelated counted as a
+success, and the brain could repeat the same wrong inference indefinitely while
+its own scoreboard applauded. It measured whether it had READ, never whether it
+had been RIGHT.
+
+### What was built
+
+**`backend/services/brain_hypothesis.py`** (new). A derived link is recorded as
+a claim BEFORE the brain goes to read -- fixing it in advance is what makes the
+reading a test rather than a story told afterwards. After the crawler reads the
+page, the graph itself is the judge: did a DIRECT edge appear for what had only
+ever been inferred across two hops?
+
+- `/ask` records the claims the answer actually made (`claims_from_answer`
+  reads the composed answer, so the claim graded is the claim the user was
+  told, not one reconstructed later that could have drifted from it).
+- `brain_crawler.crawl_one_page` adjudicates pending claims about the concept
+  it has just read, immediately after that page's edges reach the graph.
+- `scoreboard` reports the number this exists to produce.
+
+Only `derived` links are claims. Direct associations are excluded on purpose:
+an edge the brain read somewhere is already evidence, and grading it would pad
+the rate with things that were never in doubt.
+
+### The vocabulary is the design
+
+There is no `refuted` verdict, and a test asserts there never will be.
+
+A source can be silent about a true thing for many reasons -- the extractor
+missed it (real-text precision is measured at 0.50, so this is common rather
+than hypothetical), the page covered a different aspect, or the fact is stated
+on a page this one merely links to. **Absence of evidence is not evidence of
+absence.** A claim reading did not bear out is `unsupported`: the brain has not
+established it, not that it is false.
+
+Manufacturing negative knowledge out of silence would be worse than keeping
+none, because the loop acts on what it records. Turning `unsupported` into real
+refutation needs a model of where a fact WOULD be stated if it were true. That
+is a genuine open problem and is not attempted.
+
+`confirmationRate` is `None` rather than 0.0 with nothing judged, and pending
+claims are excluded from it -- a claim not yet tested is not a claim that
+failed, and counting it as one would make the rate collapse every time
+curiosity queued anything.
+
+### The first result
+
+Three real questions produced 15 claims. Five pages were queued to test them.
+The crawler read them at curiosity priority and judged:
+
+    subject         object            via         verdict
+    photosynthesis  nucleus           electron    unsupported
+    encryption      meaning           context     unsupported
+    inflation       year              universe    unsupported
+    inflation       false evidence    universe    unsupported
+
+**0 confirmed of 4 judged.** The brain's own 2-hop inferences are not being
+borne out by reading.
+
+### The control, because "everything failed" is what a broken judge looks like
+
+An adjudicator whose edge query never matches returns exactly this result, so
+the number means nothing until the judge is shown to discriminate.
+
+Run directly against the live graph, the adjudicator's own Cypher returns 1 for
+`photosynthesis--plant` (a real direct edge) and 0 for
+`photosynthesis--nucleus` (the claimed pair). `nucleus` exists with frequency
+666, so it has been read many times and still has no direct edge to
+photosynthesis.
+
+Then end to end: a planted claim the graph does support came back **confirmed**,
+lifting the rate to 0.2 -- proving the loop can say yes. The synthetic claim was
+then deleted so the scoreboard stays honest, which is why the live tally reads
+4 unsupported and 11 pending rather than 5 judged.
+
+So 0-for-4 is a finding, not a bug.
+
+### What 0-for-4 probably means, stated as hypotheses rather than conclusions
+
+Four judgements is far too few to conclude anything, and the honest reading is
+that this is a first data point on a scoreboard that did not exist yesterday.
+The candidate explanations, in the order worth testing:
+
+1. **The claims are noise.** `inflation -> false evidence` and
+   `encryption -> irregular sea` are not failed inferences, they are failed
+   extractions -- and at 0.50 precision that is the base rate. Better claims
+   need better extraction, not a better judge.
+2. **Sense conflation.** All three `inflation` claims travelled `via universe`:
+   cosmological inflation reasoning about the economic sense. The meaning layer
+   was turned on only in session 24 and its store starts empty.
+3. **The bar may be too strict.** A direct `CO_OCCURS` edge requires one
+   sentence naming both concepts. A true relation stated across two sentences
+   never produces one.
+4. **The graph is too thin for 2-hop inference to mean much.** 1.2 edges per
+   concept, session 22's finding, still the most likely root cause of everything.
+
+### Prior art, checked rather than assumed
+
+Searched before claiming novelty, and most of the claim did not survive:
+negative statements in knowledge bases are an established area, and
+hypothesis-driven crawl steering exists including a 2026 paper that
+hypothesises missing relations and schedules probes for them. NELL explicitly
+"reasons over its knowledge base to infer new beliefs it has not yet read".
+
+What could not be located is this specific closed loop -- the verdict on a
+self-derived inference becoming the crawl's own learning signal. Recorded as
+**unconfirmed, not novel**. Three searches failing to surface something is weak
+evidence of absence, which is the same epistemics this module is built around.
+
+### Rejected
+
+- **A `refuted` verdict.** See above. It is the single easiest way for this
+  design to start asserting things it never established.
+- **Re-deriving the claim at adjudication time.** It could drift from what the
+  answer said, and the scoreboard would grade a different statement than the
+  user was given.
+- **Re-opening a judged claim when it is inferred again.** `ON CONFLICT DO
+  NOTHING`: the reading that tested it is the evidence, and letting a later
+  re-derivation reset it to pending would erase outcomes instead of
+  accumulating them.
+- **Adjudicating on the next `/ask` instead of in the crawler.** The crawler
+  knows the exact moment a page's edges land in the graph; anywhere else guesses.
+
+### Open questions
+
+1. Four judgements is not a result. The rate needs tens before it means
+   anything, which needs traffic.
+2. Claim quality is capped by extraction precision (0.50). Filtering claims by
+   the evidence behind their two hops, before spending a read on them, is
+   probably the highest-value next step.
+3. The direct-edge bar may be too strict (candidate 3 above). Worth testing
+   against `brain_relations`, which now records the verb and could support a
+   softer test.
+4. `unsupported` is not yet fed back into anything. It could suppress
+   re-deriving the same link, or downweight the 2-hop path that produced it --
+   neither is built, and doing it before the rate is trustworthy would be
+   acting on four data points.
+5. The frontend does not render the new `hypotheses` field on the `curious` SSE
+   stage.
+
 ## 2026-09-06 (session 24) -- The pruner was deleting what curiosity had just learned. And the meaning layer had never run.
 
 **Status:** built, deployed, verified live. 291 tests pass.

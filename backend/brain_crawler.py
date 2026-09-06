@@ -23,6 +23,7 @@ from backend.models import BrainFrontier, BrainVisitedPage, BrainDeadLetter, Bra
 from backend.services import brain_learn
 from backend.services import brain_curiosity
 from backend.services import brain_meaning
+from backend.services import brain_hypothesis
 from backend.services import brain_relations
 from backend.services.neo4j_service import get_driver, ensure_schema
 from backend.services.brain_fetchers import (
@@ -246,6 +247,18 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
     async with neo4j_driver.session() as session:
         await brain_learn.apply_to_graph(session, word_freq, edge_counts)
 
+        # The brain queued some of these pages to test its OWN inferences --
+        # 2-hop links no source stated. Reading is only half of that; something
+        # has to look at what came back. Now that this page's edges are in the
+        # graph, any pending claim about this concept can be judged.
+        #
+        # Wrapped because judging is bookkeeping: losing it costs a data point,
+        # losing the read costs knowledge.
+        try:
+            await brain_hypothesis.adjudicate(pg_session, session, concept)
+        except Exception as exc:
+            logger.debug("Could not adjudicate claims about %r: %s", concept, exc)
+
     await brain_relations.record(pg_session, triples)
 
     await pg_session.execute(
@@ -465,6 +478,7 @@ async def main() -> None:
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=_headers) as client:
         async with AsyncSessionLocal() as pg_session:
             await ensure_frontier_index(pg_session)
+            await brain_hypothesis.ensure_schema(pg_session)
 
             # Seed the frontier if empty
             result = await pg_session.execute(select(BrainFrontier).limit(1))
