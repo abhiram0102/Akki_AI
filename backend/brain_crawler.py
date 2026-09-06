@@ -84,16 +84,35 @@ def _signal_handler(sig, frame):
 # essay's two RICHEST bands are the two immediately after 200, so the same cap
 # discards the best part of it. Both collapse to near zero eventually -- at
 # different places -- which is the signal worth acting on.
-_BLOCK = 50
-# Always read this much before judging: the opening of a page is not always
-# representative, and the essay above would have been cut short by an early
-# quiet stretch.
-_MIN_READ = 200
-# A hard ceiling, so a pathological page cannot consume the whole crawl.
-_MAX_READ = 1200
+_BLOCK = int(os.getenv("BRAIN_READ_BLOCK", "50"))
+
+# Read this much before judging, because the opening of a page is not always
+# representative and a quiet first block should not end a good page.
+#
+# This MUST stay below the fixed cap it replaced, and that was learned in
+# production rather than reasoned. It was first set to 200 -- the same value as
+# the old cap -- which meant a page could only ever be read MORE than before
+# and never less: the mechanism spent extra time on productive pages and never
+# once paid any of it back on pages that die early. That is half the idea. Live
+# crawl rate fell from ~1,450-2,000 pages/hour to ~810 as a result, with a
+# 500-sentence page taking 27 seconds.
+#
+# At 100 an unproductive page stops after two blocks instead of four. Sweeping
+# 50/100/150/200 over the stored corpus changes nothing on either page there,
+# because both stay productive well past 200 -- which is precisely why the
+# corpus cannot calibrate this and the live read-distribution has to.
+_MIN_READ = int(os.getenv("BRAIN_READ_MIN", "100"))
+
+# A hard ceiling, so a pathological page cannot consume the whole crawl. At
+# roughly 10ms a sentence this bounds one page at about 12 seconds of parsing,
+# against a 1.0s politeness interval -- deliberately generous, because
+# truncating a genuinely rich page is the fault this whole mechanism exists to
+# fix. Live pages have not exceeded ~700.
+_MAX_READ = int(os.getenv("BRAIN_READ_MAX", "1200"))
+
 # Stop when a block yields less than this share of the best block seen so far.
 # The same share-of-best rule already used to pick sentence terminators.
-_YIELD_SHARE = 0.2
+_YIELD_SHARE = float(os.getenv("BRAIN_READ_SHARE", "0.2"))
 
 
 def _read_adaptively(sentences: list[str], extract) -> tuple[list, int]:

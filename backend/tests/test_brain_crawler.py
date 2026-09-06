@@ -176,3 +176,39 @@ def test_the_crawler_module_can_actually_start():
         assert brain_crawler._running is False, "a termination signal did not stop the loop"
     finally:
         brain_crawler._running = original
+
+
+def test_the_read_floor_stays_below_the_cap_it_replaced():
+    """The floor must leave room for the mechanism to SAVE time, not only spend it.
+
+    It was first set to 200, the same value as the fixed cap it replaced. That
+    made adaptive reading purely additive: a page could be read more than
+    before but never less, so the extra time spent on productive pages was
+    never paid back on pages that die early. Live crawl rate fell from roughly
+    1,450-2,000 pages/hour to 810.
+
+    This is the invariant that was violated, stated so it cannot be violated
+    again by someone raising the floor to be safe."""
+    assert brain_crawler._MIN_READ < 200, (
+        "the read floor is at or above the old fixed cap, so adaptive reading "
+        "can only ever read more than the cap did and never less"
+    )
+    assert brain_crawler._MIN_READ >= brain_crawler._BLOCK * 2, (
+        "fewer than two blocks is not enough evidence to judge a page"
+    )
+
+
+def test_an_unproductive_page_now_stops_before_the_old_cap():
+    """The behaviour the floor change buys: a page that dies early must cost
+    less than the fixed cap did, or the mechanism has no upside on the many
+    pages that are mostly navigation."""
+    def extract(sentence):
+        index = int(sentence.split()[-1])
+        return [("a", "b")] * (4 if index < 50 else 0)
+
+    sentences = [f"sentence number {i}" for i in range(600)]
+    _, read = brain_crawler._read_adaptively(sentences, extract)
+    assert read < 200, (
+        f"read {read} sentences of a page that stopped producing after 50; "
+        "the old fixed cap would have read 200"
+    )

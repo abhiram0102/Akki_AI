@@ -4,6 +4,70 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 17) -- Adaptive reading was half-implemented, and production said so
+
+**Status:** flaw found in session 15's own change, fixed, invariant pinned by test.
+
+### What was wrong with the fix from two sessions ago
+
+`_MIN_READ` was set to 200 -- **the same value as the fixed cap it replaced**.
+The old code read *up to* 200 sentences; the new code reads *at least* 200. So
+adaptive reading could only ever read MORE than before and never less. It spent
+extra time on productive pages and never once paid any of it back on pages that
+die early, which is half of "read where it pays, stop where it does not".
+
+That is wrong by construction, independent of any measurement. Production made
+it visible: crawl rate fell from ~1,450-2,000 pages/hour to ~810, with a
+500-sentence page taking 27 seconds and a 48-second gap around two 300-sentence
+pages.
+
+**A claim from session 16 has to be withdrawn.** "Adaptive reading did not slow
+the crawl" was based on a seven-minute sample and is false. Longer observation
+reversed it. Seven minutes was not enough to see it, and the earlier note said
+so with more confidence than the evidence carried.
+
+### The fix
+
+`_MIN_READ` lowered to 100, so an unproductive page stops after two blocks
+instead of four and the mechanism can save time as well as spend it. All four
+knobs (`BRAIN_READ_BLOCK`/`MIN`/`MAX`/`SHARE`) are now environment settings,
+because the containers bake code into the image and every tuning experiment
+otherwise costs a rebuild.
+
+Sweeping the floor over 50/100/150/200 against the stored corpus changes
+**nothing** on either page -- both stay productive well past 200. That is not
+evidence the change is safe; it is evidence the corpus **cannot** calibrate
+this, exactly as a hand-written gold set could not settle the parser-model
+question in session 10. The live read-distribution is the only thing that can:
+
+    <=100: 78 pages   <=200: 40   <=300: 40   <=400: 15   <=500: 1   >500: 4
+
+`test_the_read_floor_stays_below_the_cap_it_replaced` now pins the invariant, so
+raising the floor "to be safe" reintroduces the fault loudly.
+
+### Two alarms I raised and then disproved myself
+
+- **"Pruning never runs -- 0 cycles after 391 pages."** False. The run had done
+  127 pages, below the 200 threshold; a prune then fired at exactly 202. The
+  error was windowing a query on a guessed restart time instead of the
+  container's actual `StartedAt`.
+- **"5.8x more relations per page."** Withdrawn. A prune deletes every
+  `count < 2` edge, so `sum(r.count)` is **non-monotonic** -- it fell from
+  186,540 to 178,254 across one cycle. Comparing a fresh pre-prune window
+  against a post-prune historical average is meaningless. The honest position
+  is that relations-per-hour remains unmeasured.
+
+### Open questions
+
+1. **Whether adaptive reading is net positive is still unknown.** Relations per
+   page is clearly up; pages per hour is clearly down; the product needs a
+   measurement spanning whole prune cycles, which nothing here has done yet.
+2. `_MAX_READ = 1200` bounds one page at ~12s of parsing against a 1.0s
+   politeness interval. Live pages have not exceeded ~700, so it has not bound
+   anything yet -- but it is generous and untested.
+
+---
+
 ## 2026-09-06 (session 16) -- The crawler could not start. Commit 8a2cdda
 
 **Status:** fixed, deployed, crawler verified running on current code.
