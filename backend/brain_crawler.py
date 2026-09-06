@@ -48,6 +48,26 @@ PRUNE_EVERY_N_PAGES = 200
 BATCH_SIZE = 20
 
 
+# Set false by a termination signal so the loop finishes the page it is on and
+# stops cleanly, rather than being killed mid-write and leaving a frontier
+# entry claimed but unrecorded.
+#
+# This and `_signal_handler` were referenced by `main()` but had been lost from
+# the module, so the crawler raised NameError on the first line of startup and
+# could not run at all from source. It went unnoticed because the container was
+# started from an older image and never restarted; the fault only appears on a
+# restart. Restored rather than removed: `while _running` in the main loop is
+# the graceful-shutdown path, and without it a SIGTERM kills the process
+# mid-page.
+_running = True
+
+
+def _signal_handler(sig, frame):
+    global _running
+    logger.info("Signal %s received - finishing current page, then stopping.", sig)
+    _running = False
+
+
 # How much of a page to read. Sentences are parsed in blocks, and reading stops
 # when a block stops producing -- the page itself says when it is finished,
 # rather than a fixed count deciding for it.

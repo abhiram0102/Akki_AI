@@ -154,3 +154,25 @@ class TestAdaptiveReading:
         pairs, read = brain_crawler._read_adaptively(self._page(300), extract)
         assert read == 300
         assert len(pairs) == 300 - 30  # every sentence ending in 7
+
+
+def test_the_crawler_module_can_actually_start():
+    """A regression guard for a fault that no test could see and that the
+    running container hid for eighteen hours.
+
+    `main()` installed signal handlers referring to `_signal_handler`, which had
+    been dropped from the module. The crawler therefore raised NameError on the
+    first line of startup and could not run at all from source -- but the
+    container had been started from an older image and never restarted, so it
+    kept running the code that still had them. The fault only surfaced on a
+    restart.
+
+    Nothing here imports `main()`, so nothing caught it. This asserts the names
+    startup depends on are present and that the shutdown flag actually flips."""
+    assert brain_crawler._running is True or brain_crawler._running is False
+    original = brain_crawler._running
+    try:
+        brain_crawler._signal_handler(15, None)
+        assert brain_crawler._running is False, "a termination signal did not stop the loop"
+    finally:
+        brain_crawler._running = original
