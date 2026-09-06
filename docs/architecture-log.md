@@ -4,6 +4,79 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 18) -- Adaptive reading measured on real pages: it does nothing. Claim withdrawn.
+
+**Status:** measured properly at last. The mechanism is kept, but the case made
+for it in session 15 was wrong and is withdrawn here.
+
+### The measurement that should have been done first
+
+Twelve pages taken from what the crawler had actually just visited, fetched and
+parsed offline so that pruning could not confound anything, each strategy run
+over identical input:
+
+| strategy | relations | sentences parsed | relations per 1k parsed |
+|---|---|---|---|
+| old fixed cap 200 | 480 | 1527 | 314.3 |
+| adaptive, floor 200 | 483 | 1577 | 306.3 |
+| adaptive, floor 100 | 481 | 1527 | 315.0 |
+
+All three are the same number. Splitting by page length does not rescue it
+either -- on the five pages **longer** than 200 sentences, adaptive parsed
+exactly 1000 sentences, which is 5 x 200: it stopped at the old cap on every
+one of them, of its own accord, because yield had genuinely fallen by then.
+
+**So on the crawl as it actually is, adaptive reading reproduces the fixed cap
+and buys nothing.**
+
+### Why session 15 concluded the opposite
+
+It measured on the stored eval corpus: a 511-sentence Wikipedia article and a
+712-sentence encyclopedia essay. Real crawled pages in this sample run 18 to
+318 sentences. The corpus pages are not typical, they are the extreme tail, and
+"+93% relations" was an artifact of measuring only there.
+
+This is the same error as session 10's parser-model table, in the same project,
+three sessions later: a small set of unusually rich hand-picked pages pointed
+the opposite way to a sample of what the system actually sees. The lesson did
+not transfer because the earlier one was recorded as being about *parser
+models* rather than about *what a corpus is for*.
+
+### Kept anyway, and why that is not self-justification
+
+The mechanism costs nothing measured -- identical relations, identical parsing.
+And the failure it removes is real and measured, just not currently triggered:
+on the 712-sentence essay the fixed cap collects 53 relations against 163, a
+3x loss, because that page's richest bands sit past sentence 200. Wikipedia
+articles never reach that length, so the case never arises today.
+
+It arises the moment the crawl stops being 100% Wikipedia -- which is an
+already-flagged goal, since convergence detection's premise is unrelated
+branches and a single site cannot supply them. This is working code that is
+currently inactive because the input never triggers it, not a prototype waiting
+to be finished.
+
+The alternative -- revert and re-add later -- would mean deleting measured,
+tested behaviour to reintroduce it under the same evidence.
+
+### What is now true, stated plainly
+
+- Adaptive reading: **neutral** on the current crawl. Not "+93%".
+- The session-16 claim that it did not slow the crawl: **false**, that was a
+  seven-minute sample, and the floor bug behind it is fixed in 11be52f.
+- "5.8x more relations per page": **withdrawn**, it compared a pre-prune window
+  against a post-prune average.
+- Crawl rate after the floor fix: ~1,040 pages/hour, against ~810 with the bug
+  and ~1,450-2,000 historically. The residual gap is not explained.
+
+### Open questions
+
+1. The residual throughput gap against the historical rate.
+2. Whether the eval corpus should gain a typical-length page. Three unusually
+   rich documents have now produced two wrong conclusions.
+
+---
+
 ## 2026-09-06 (session 17) -- Adaptive reading was half-implemented, and production said so
 
 **Status:** flaw found in session 15's own change, fixed, invariant pinned by test.
