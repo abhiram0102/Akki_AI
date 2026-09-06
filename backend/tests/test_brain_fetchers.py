@@ -14,10 +14,12 @@ import pytest
 from backend.services.brain_fetchers import RobotsChecker, RateLimiter, fetch, fetch_structure
 
 
-def _mock_response(text: str, status_code: int = 200):
+def _mock_response(text: str, status_code: int = 200, history=None, url=None):
     resp = MagicMock()
     resp.status_code = status_code
     resp.text = text
+    resp.history = history or []
+    resp.url = url or ""
     return resp
 
 
@@ -113,3 +115,24 @@ class TestFetch:
         structure = await fetch_structure("https://example.org/start", client)
         assert len(structure["sentences"]) >= 5
         assert all(len(s.split()) >= 5 for s in structure["sentences"])
+
+    async def test_redirected_to_is_none_when_no_redirect_happened(self):
+        client = AsyncMock()
+        client.get.return_value = _mock_response("<p>Some ordinary page content here.</p>")
+        structure = await fetch_structure("https://example.org/page", client)
+        assert structure["redirectedTo"] is None
+
+    async def test_redirected_to_reports_the_final_address_after_a_real_redirect(self):
+        """A caller resolving an address from a search page (brain_learn.
+        resolve_source) needs to know when the HTTP transport itself already
+        redirected to a single answer, rather than rendering a results list --
+        that is a stronger signal than anything derived from the landed-on
+        page's own links."""
+        client = AsyncMock()
+        client.get.return_value = _mock_response(
+            "<p>The article we actually landed on.</p>",
+            history=["https://example.org/search?q=term"],
+            url="https://example.org/wiki/Term",
+        )
+        structure = await fetch_structure("https://example.org/search?q=term", client)
+        assert structure["redirectedTo"] == "https://example.org/wiki/Term"

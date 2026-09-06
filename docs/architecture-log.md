@@ -4,6 +4,86 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 11) — resolve_source: found live, fixed, and re-verified live
+
+**Status:** implemented and tested. All tests in this change's own files pass
+(`test_brain_learn.py`, `test_brain_fetchers.py`, plus the pre-existing
+crawler/learn-engine tests, unaffected). The whole-suite number was a moving
+target while writing this: `brain_discovery.py` had uncommitted changes
+throughout (confirmed via `git status`) from ammu's concurrent work on the
+nav-chrome/citation-fragment issue, and `test_brain_discovery.py` /
+`test_eval_baseline.py` failures tracked her edits in progress, not anything
+in this diff -- this session's own changes never touch that file.
+
+### Found by actually running the system, not by a test
+
+Smoke-testing the live app (per Sanju's request) against a genuinely new
+topic ("graphene") surfaced a bug no test could have caught: `resolve_source`
+resolved it to the Wikipedia article "GrapheneOS" (a phone OS) instead of the
+material, and extraction correctly found nothing useful on that page. Neither
+the unit suite nor the eval harness exercises this function at all -- the
+eval corpus is stored HTML, so the harness never calls the step that
+*chooses* a page in the first place.
+
+### Two independent bugs in one function, both fixed
+
+1. **Word-overlap ranking couldn't tell a real word from a fragment of a
+   longer one.** "graphene" is a raw substring of "grapheneos", so a
+   bag-of-words overlap count scored both references identically and ties
+   resolved arbitrarily. Replaced with `_reference_match_score`: three
+   ordinal tiers -- exact anchor-text match, token-bounded match (a real
+   word/phrase, not a substring), bare substring match -- with overlap count
+   used only to break ties *within* a tier, never to let raw count override
+   the tier ordering. No hardcoded knowledge of Wikipedia's (or any site's)
+   naming conventions -- the ordering comes from the shape of the match
+   itself, per the project's charter.
+2. **The bigger one, found only by testing the fix against the live site:**
+   searching "graphene" doesn't render a results list at all -- MediaWiki
+   302-redirects straight to the real article on an exact title match. The
+   old code (and the fixed ranking, on its own) was reading *that landed-on
+   article's own* outbound links ("Discovery of graphene", "GrapheneOS",
+   "Graphite", ...) as if they were search results, and ranking among those.
+   `brain_fetchers.fetch_structure` now reports `redirectedTo` -- the final
+   address, if and only if `resp.history` shows the HTTP transport itself
+   redirected there. `resolve_source` trusts that outright when present,
+   never consulting references at all: the search mechanism's own redirect
+   is stronger evidence than anything derived from the page it lands on.
+   This reads the transport's own behaviour, not any site's search format --
+   the same non-hardcoding constraint as fix (1).
+
+### Verified live, twice
+
+Per the tripwire's own limit (`resolve_source` isn't in the eval harness, so
+a green suite is not evidence here): ran the fix against the real Wikipedia
+search endpoint before and after. Before: `graphene` -> `GrapheneOS`. After
+fix (1) alone: `graphene` -> `Discovery_of_graphene` (better, still wrong).
+After fix (2): `graphene` -> `Graphene`, and `penicillin`/`insulin`/
+`mitochondria` (previously resolving to `..._` with a stray trailing
+underscore -- the same reference-ranking symptom) now resolve to the clean
+canonical article address too.
+
+### Scope and ownership
+
+`brain_learn.py` and `brain_fetchers.py` only. `brain_discovery.py` stays
+ammu's -- confirmed via `git status` before and after this change that it
+was never touched, matching the file-level split agreed for this pair of
+issues (mirrors the `brain_nlp.py` split earlier in this thread, pointed the
+other way).
+
+### Open items, named rather than fixed
+
+- Ammu's original second-signal suggestion -- fetch the chosen page and
+  check whether its own text confirms the topic -- is now largely
+  subsumed by the redirect signal for the common "single clear match"
+  case, but remains a real idea for the case where a search page renders a
+  genuine results list with several plausible candidates and no redirect
+  happens. Not built; flagged for whoever next touches this function.
+- The reference-ranking tiers were designed and tested against constructed
+  cases (the real bug's shape, reproduced without hardcoding the specific
+  site), not against a sampled set of real ambiguous search pages the way
+  Task C sampled real sentences. Worth doing if this function turns out to
+  need more than the two fixes above.
+
 ## 2026-09-06 (session 10) — Parser model: decided, and the measurement redirected the work
 
 **Status:** decided and recorded. 219 backend tests pass.

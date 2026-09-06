@@ -57,6 +57,87 @@ async def test_resolve_source_returns_nothing_rather_than_guessing_an_address(mo
 
 
 @pytest.mark.asyncio
+async def test_resolve_source_trusts_a_redirect_over_ranking_the_landed_page(monkeypatch):
+    """Found live: searching "graphene" 302-redirects straight to the real
+    article, but the article's own outbound links ("Discovery of graphene",
+    "GrapheneOS", "Graphite", ...) were then ranked as if they were search
+    results, and even a fixed ranking picked the wrong one among them. The
+    search engine's own redirect is stronger evidence than anything derived
+    from the page it lands on, so it must win outright -- references are
+    never even consulted when this signal is present."""
+    async def fake_fetch(url, client, narrow_to_shape=True):
+        return {
+            "text": "", "sentences": [], "delimiters": ("<", ">"), "terminators": ["."],
+            "redirectedTo": "https://example.org/wiki/Graphene",
+            "references": [
+                {"url": "https://example.org/wiki/Discovery_of_graphene",
+                 "text": "Discovery of graphene"},
+                {"url": "https://example.org/wiki/GrapheneOS", "text": "GrapheneOS"},
+            ],
+        }
+    monkeypatch.setattr("backend.services.brain_fetchers.fetch_structure", fake_fetch)
+    got = await brain_learn.resolve_source("graphene", MagicMock())
+    assert got == "https://example.org/wiki/Graphene"
+
+
+@pytest.mark.asyncio
+async def test_resolve_source_prefers_exact_match_over_a_longer_superstring(monkeypatch):
+    """Found live: asking about "graphene" resolved to a page titled
+    "grapheneos" instead, because plain word-overlap counting scored a
+    substring match ("graphene" inside "grapheneos") the same as a real
+    word match. The reference whose anchor text IS the query exactly must
+    win regardless of what else happens to contain it as a substring."""
+    async def fake_fetch(url, client, narrow_to_shape=True):
+        return {
+            "text": "", "sentences": [], "delimiters": ("<", ">"), "terminators": ["."],
+            "references": [
+                {"url": "https://example.org/wiki/GrapheneOS", "text": "GrapheneOS"},
+                {"url": "https://example.org/wiki/Graphene", "text": "Graphene"},
+            ],
+        }
+    monkeypatch.setattr("backend.services.brain_fetchers.fetch_structure", fake_fetch)
+    got = await brain_learn.resolve_source("graphene", MagicMock())
+    assert got == "https://example.org/wiki/Graphene"
+
+
+@pytest.mark.asyncio
+async def test_resolve_source_prefers_token_boundary_over_bare_substring(monkeypatch):
+    """A reference where the query appears as a real, bounded word/phrase
+    must outrank one where it only appears embedded inside a longer word,
+    even with no exact-match reference present at all."""
+    async def fake_fetch(url, client, narrow_to_shape=True):
+        return {
+            "text": "", "sentences": [], "delimiters": ("<", ">"), "terminators": ["."],
+            "references": [
+                {"url": "https://example.org/wiki/Supergraphene", "text": "Supergraphene alloy"},
+                {"url": "https://example.org/wiki/Graphene_sheet", "text": "Graphene sheet structure"},
+            ],
+        }
+    monkeypatch.setattr("backend.services.brain_fetchers.fetch_structure", fake_fetch)
+    got = await brain_learn.resolve_source("graphene", MagicMock())
+    assert got == "https://example.org/wiki/Graphene_sheet"
+
+
+@pytest.mark.asyncio
+async def test_resolve_source_breaks_ties_within_a_tier_by_word_overlap(monkeypatch):
+    """Within the same match tier (here: neither is an exact or bounded
+    match to the full two-word query), more overlapping words is still a
+    real, if weaker, signal and should win the tie."""
+    async def fake_fetch(url, client, narrow_to_shape=True):
+        return {
+            "text": "", "sentences": [], "delimiters": ("<", ">"), "terminators": ["."],
+            "references": [
+                {"url": "https://example.org/wiki/Machine", "text": "Machine parts"},
+                {"url": "https://example.org/wiki/MachineLearningOverview",
+                 "text": "Machine learning overview"},
+            ],
+        }
+    monkeypatch.setattr("backend.services.brain_fetchers.fetch_structure", fake_fetch)
+    got = await brain_learn.resolve_source("machine learning", MagicMock())
+    assert got == "https://example.org/wiki/MachineLearningOverview"
+
+
+@pytest.mark.asyncio
 async def test_resolve_source_returns_nothing_when_the_page_offers_no_references(monkeypatch):
     async def empty(url, client, narrow_to_shape=True):
         return {"text": "", "sentences": [], "links": [],

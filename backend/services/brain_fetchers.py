@@ -82,8 +82,19 @@ async def fetch_structure(url: str, client, narrow_to_shape: bool = True) -> dic
     sentences already split at boundaries learned from this document, and the
     delimiters and terminators that were discovered along the way, so a caller
     never has to re-split prose with a rule of its own.
+
+    Also reports `redirectedTo`: the final address, if and only if the HTTP
+    transport itself redirected there (`resp.history` non-empty) -- e.g. a
+    search endpoint that redirects straight to a single matching page instead
+    of rendering a results list. That is a real signal a caller resolving an
+    address from a search page can use directly, cheaper and more certain
+    than ranking the landed-on page's own outbound links. `None` when nothing
+    redirected, which every existing caller that ignores this key is
+    unaffected by.
     """
     resp = await client.get(url)
-    return brain_discovery.discover_structure(
+    structure = brain_discovery.discover_structure(
         resp.text, url, narrow_to_shape=narrow_to_shape
     )
+    structure["redirectedTo"] = str(resp.url) if getattr(resp, "history", None) else None
+    return structure

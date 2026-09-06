@@ -5,6 +5,7 @@ Extracted from `backend.brain_crawler.crawl_one_page` so on-demand learning
 edges to Neo4j through one code path instead of two copies drifting apart.
 """
 import os
+import re
 from collections import Counter
 from urllib.parse import quote_plus
 
@@ -52,6 +53,57 @@ _SEARCH_URL_TEMPLATE = os.getenv(
 )
 
 
+def _reference_match_score(term: str, reference: dict) -> tuple[int, int]:
+    """How well a search-result reference matches the queried term,
+    structurally rather than by any site-specific vocabulary.
+
+    Found live (not by any test): asking about "graphene" resolved to the
+    Wikipedia article "GrapheneOS" instead. Plain word-overlap counting
+    scored both references equally, because "graphene" is a raw substring
+    of "grapheneos" and a bag-of-words count cannot tell a real word from a
+    fragment of a longer one -- ties then resolved arbitrarily.
+
+    Three ordinal tiers, each strictly outranking the one below regardless
+    of overlap count:
+      3 -- EXACT: the reference's own anchor text, normalized, equals the
+           query exactly.
+      2 -- TOKEN-BOUNDARY: the query appears in the reference (text or URL)
+           bounded by non-word characters on both sides -- a real word/
+           phrase, not a fragment of a longer one.
+      1 -- SUBSTRING: the query appears anywhere as raw text, with no
+           boundary requirement (this is what let "grapheneos" through
+           before).
+      0 -- no match on the query as a whole.
+    Word-overlap count (how many of the query's individual words appear
+    anywhere in the reference) is returned alongside the tier and used only
+    to break ties WITHIN a tier -- never to let a bag-of-words count
+    override the tier ordering itself, which is the mistake this replaces.
+
+    No hardcoded knowledge of Wikipedia's (or any site's) URL, title-casing,
+    or disambiguation conventions -- the ordering comes from the shape of
+    the match itself, the same charter this project applies to markup and
+    sentence-boundary discovery.
+    """
+    text = reference.get("text") or ""
+    url = reference.get("url") or ""
+    haystack = f"{text} {url}".lower()
+    normalized_term = " ".join(term.lower().split())
+    normalized_text = " ".join(text.lower().split())
+
+    if normalized_term and normalized_text == normalized_term:
+        tier = 3
+    elif normalized_term and re.search(rf"\b{re.escape(normalized_term)}\b", haystack):
+        tier = 2
+    elif normalized_term and normalized_term in haystack:
+        tier = 1
+    else:
+        tier = 0
+
+    wanted = {w for w in normalized_term.split() if w}
+    overlap = sum(1 for word in wanted if word in haystack)
+    return (tier, overlap)
+
+
 async def resolve_source(term: str, client) -> str | None:
     """Find an address to read about `term`, by reading a search page.
 
@@ -73,6 +125,19 @@ async def resolve_source(term: str, client) -> str | None:
         structure = await fetch_structure(search_url, client, narrow_to_shape=False)
     except Exception:
         return None
+
+    # A search that redirected straight to one page, rather than rendering a
+    # results listing, already picked an answer with more certainty than any
+    # link-ranking heuristic applied afterward could -- the search mechanism
+    # itself is stronger evidence than the page it lands on. Found live:
+    # searching "graphene" 302-redirects straight to the real article, and
+    # ranking that article's own "see also" links (Discovery of graphene,
+    # GrapheneOS, Graphite, ...) as if they were search results picked the
+    # wrong one even after fixing the ranking itself. This reads the HTTP
+    # transport's own redirect behaviour, not any site's search-result format.
+    if structure.get("redirectedTo"):
+        return structure["redirectedTo"]
+
     references = structure.get("references") or [
         {"url": u, "text": ""} for u in (structure.get("links") or [])
     ]
@@ -81,17 +146,12 @@ async def resolve_source(term: str, client) -> str | None:
 
     # Take the reference that best matches what was asked for, not whichever
     # appeared first. A search page leads with its own navigation, so the first
-    # reference on it is reliably the wrong one. Matching uses the words the
-    # document attached to each reference and the words in the address itself,
-    # both of which are evidence the document supplied.
-    wanted = {w for w in term.lower().split() if w}
-
-    def score(reference: dict) -> int:
-        haystack = (reference.get("text", "") + " " + reference["url"]).lower()
-        return sum(1 for word in wanted if word in haystack)
-
-    best = max(references, key=score)
-    return best["url"] if score(best) else references[0]["url"]
+    # reference on it is reliably the wrong one. Ranked by match quality
+    # (_reference_match_score), not raw word-overlap count -- see that
+    # function's docstring for why overlap count alone was wrong.
+    scored = [(_reference_match_score(term, reference), reference) for reference in references]
+    best_score, best = max(scored, key=lambda pair: pair[0])
+    return best["url"] if best_score != (0, 0) else references[0]["url"]
 
 
 async def learn_concept(term: str, client, neo4j_driver, follow_links: int = 1) -> dict:
