@@ -1,5 +1,6 @@
 """Tests for the brain query service — mocked Neo4j session/driver, no live
 graph required."""
+import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from backend.services import brain_service
@@ -183,3 +184,118 @@ class TestGetStatus:
         result = await brain_service.get_status(pg_session)
         assert result["totalPages"] == 42
         assert result["frontierSize"] == 17
+
+
+def _fake_driver_with_background(reach_by_seed: dict, pool: list[str]):
+    """A driver that answers both queries convergence now makes: the random
+    seed draw used to measure the graph's noise floor, and the per-seed
+    traversal."""
+    driver = MagicMock()
+
+    async def run(query, **params):
+        if "rand()" in query:
+            return _make_result([{"word": w} for w in pool])
+        seed = params.get("c1")
+        return _make_result(
+            [{"word": w, "depth": d} for w, d in reach_by_seed.get(seed, {}).items()]
+        )
+
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = session_cm
+    session_cm.__aexit__.return_value = False
+    session_cm.run = run
+    driver.session.return_value = session_cm
+    return driver
+
+
+class TestConvergenceAgainstChance:
+    @pytest.fixture(autouse=True)
+    def _clear_measured_floor(self):
+        """The noise floor is cached per graph, so it has to be cleared between
+        tests or one test's graph is measured against another's."""
+        brain_service._BACKGROUND.clear()
+        yield
+        brain_service._BACKGROUND.clear()
+
+    async def test_a_concept_everything_reaches_is_ranked_below_a_rare_one(self, monkeypatch):
+        """The measured failure this fixes. On the live graph, seeding three
+        unrelated topics returned "dna" from all three origins and "time" from
+        two -- and ranked by origin count alone they sit in one list, with no
+        way to tell that "time" turns up for 38% of RANDOM seed triples while
+        "dna" turns up for none of them.
+
+        Here "common" is reachable from every seed in the graph and "rare" from
+        almost none, so "common" is reached from more origins. It must still
+        rank below."""
+        pool = [f"seed{i}" for i in range(10)]
+        reach = {s: {"common": 1} for s in pool}
+        reach.update({
+            "alpha": {"common": 1, "rare": 2},
+            "beta": {"common": 1, "rare": 2},
+            "gamma": {"common": 1},
+        })
+        monkeypatch.setattr(brain_service, "get_driver",
+                            lambda: _fake_driver_with_background(reach, pool))
+        result = await brain_service.discover_convergence(
+            ["alpha", "beta", "gamma"], min_origins=2)
+        points = {p["concept"]: p for p in result["convergencePoints"]}
+        assert points["common"]["originCount"] == 3
+        assert points["rare"]["originCount"] == 2
+        assert result["convergencePoints"][0]["concept"] == "rare", (
+            "a concept reached from every random seed outranked a rare one "
+            "purely on origin count"
+        )
+        assert points["rare"]["surprise"] > points["common"]["surprise"]
+
+    async def test_the_noise_floor_is_measured_from_the_graph_not_a_word_list(self, monkeypatch):
+        """The same word must be treated as noise or as signal depending on how
+        the graph behaves, not on what the word is. A stopword list would be
+        the hardcoded knowledge this project exists to avoid -- and would be
+        wrong for any graph built from something other than English prose."""
+        pool = [f"seed{i}" for i in range(10)]
+        seeds = ["alpha", "beta"]
+        reach = {"alpha": {"time": 1}, "beta": {"time": 1}}
+
+        everywhere = {s: {"time": 1} for s in pool}
+        everywhere.update(reach)
+        monkeypatch.setattr(brain_service, "get_driver",
+                            lambda: _fake_driver_with_background(everywhere, pool))
+        noisy = await brain_service.discover_convergence(seeds, min_origins=2)
+
+        brain_service._BACKGROUND.clear()
+        nowhere = {s: {"unrelated": 1} for s in pool}
+        nowhere.update(reach)
+        monkeypatch.setattr(brain_service, "get_driver",
+                            lambda: _fake_driver_with_background(nowhere, pool))
+        telling = await brain_service.discover_convergence(seeds, min_origins=2)
+
+        noisy_score = next(p["surprise"] for p in noisy["convergencePoints"]
+                           if p["concept"] == "time")
+        telling_score = next(p["surprise"] for p in telling["convergencePoints"]
+                             if p["concept"] == "time")
+        assert telling_score > noisy_score, (
+            "the same concept scored the same in both graphs, so the floor is "
+            "not being read from the graph"
+        )
+
+    async def test_ranking_falls_back_to_origin_count_without_a_measured_floor(self, monkeypatch):
+        """A graph too small or too new to sample must still answer, rather
+        than scoring everything as equally surprising and ordering at random."""
+        reach = {
+            "fire": {"transformation": 2, "energy": 1},
+            "music": {"transformation": 3, "rhythm": 1},
+            "biology": {"transformation": 2, "cell": 1},
+        }
+        monkeypatch.setattr(brain_service, "get_driver",
+                            lambda: _fake_driver_with_background(reach, []))
+        result = await brain_service.discover_convergence(
+            ["fire", "music", "biology"], min_origins=2)
+        assert result["convergencePoints"][0]["concept"] == "transformation"
+
+    async def test_surprise_grows_as_a_concept_gets_rarer(self):
+        """The score has to be monotone in rarity, or ranking by it means
+        nothing."""
+        common = brain_service._surprise(2, 3, 0.5)
+        uncommon = brain_service._surprise(2, 3, 0.05)
+        rare = brain_service._surprise(2, 3, 0.005)
+        assert rare > uncommon > common
