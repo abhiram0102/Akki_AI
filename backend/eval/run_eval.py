@@ -111,6 +111,61 @@ def measure_extraction() -> dict:
     return out
 
 
+def measure_pipeline_quality() -> dict:
+    """Page-level assertions against discovery+extraction run FRESH, today --
+    the check `measure_relation_quality` and `measure_real_text_quality`
+    cannot perform, because both feed a frozen sentence string straight to
+    `extract_dependencies` and so can never see a `brain_discovery` fix or
+    regression at all. See `pipeline_assertions` module docstring for the
+    full account of why this exists and how it was confirmed necessary.
+
+    Deliberately does NOT apply `measure_extraction`'s 200-sentence
+    production cap. That cap simulates a realistic per-page crawl budget,
+    which is the wrong thing here: a discovery improvement that removes
+    junk EARLIER in a page shifts every real sentence after it to a lower
+    index, which can push a real, wanted fact past a fixed cutoff that used
+    to keep it in scope. Confirmed live: the Warburg/"range" sentences
+    below sat comfortably under 200 before session 12's discovery fix and
+    at indices 214/231/450 afterward -- a cap here would have reported a
+    fix as a regression. This measurement asks "does this page's content
+    support extracting this fact at all", not "would a capped production
+    crawl reach it", so it reads every sentence discovery finds.
+    """
+    from backend.eval.pipeline_assertions import (
+        EXPECTED_SOMEWHERE_ON_PAGE, FORBIDDEN_ANYWHERE_ON_PAGE,
+    )
+    from backend.services import brain_discovery, brain_nlp
+
+    page_relations: dict[str, set] = {}
+    for name, (url, html) in sorted(_load_corpus().items()):
+        structure = brain_discovery.discover_structure(html, url)
+        relations = set()
+        for sentence in structure["sentences"]:
+            try:
+                relations.update(brain_nlp.extract_dependencies(sentence))
+            except Exception:
+                continue
+        page_relations[name] = relations
+
+    missing_expected = []
+    for page, pair, provenance in EXPECTED_SOMEWHERE_ON_PAGE:
+        if pair not in page_relations.get(page, set()):
+            missing_expected.append({"page": page, "pair": list(pair), "provenance": provenance})
+
+    present_forbidden = []
+    for page, pair, provenance in FORBIDDEN_ANYWHERE_ON_PAGE:
+        if pair in page_relations.get(page, set()):
+            present_forbidden.append({"page": page, "pair": list(pair), "provenance": provenance})
+
+    return {
+        "expectedChecked": len(EXPECTED_SOMEWHERE_ON_PAGE),
+        "expectedMissing": missing_expected,
+        "forbiddenChecked": len(FORBIDDEN_ANYWHERE_ON_PAGE),
+        "forbiddenPresent": present_forbidden,
+        "passed": not missing_expected and not present_forbidden,
+    }
+
+
 def measure_relation_quality() -> dict:
     """Precision, recall and F1 against hand-labelled sentences.
 
@@ -206,6 +261,7 @@ def run() -> dict:
         "extraction": measure_extraction(),
         "relationQuality": measure_relation_quality(),
         "realTextQuality": measure_real_text_quality(),
+        "pipelineQuality": measure_pipeline_quality(),
     }
 
 
@@ -247,6 +303,19 @@ def _report(results: dict) -> str:
             lines.append(f"    [{miss['page']}#{miss['index']}] {miss['sentence'][:80]}")
             lines.append(f"      expected {miss['expected']}")
             lines.append(f"      got      {miss['got']}")
+
+    p = results["pipelineQuality"]
+    lines += ["", "Page-level assertions against discovery+extraction run FRESH today "
+                  "(not frozen strings)", ""]
+    lines.append(f"  expected pairs checked   {p['expectedChecked']}   "
+                 f"missing: {len(p['expectedMissing'])}")
+    lines.append(f"  forbidden pairs checked  {p['forbiddenChecked']}   "
+                 f"present: {len(p['forbiddenPresent'])}")
+    lines.append(f"  passed                   {p['passed']}")
+    for miss in p["expectedMissing"]:
+        lines.append(f"    MISSING  [{miss['page']}] {tuple(miss['pair'])}  ({miss['provenance']})")
+    for bad in p["forbiddenPresent"]:
+        lines.append(f"    PRESENT  [{bad['page']}] {tuple(bad['pair'])}  ({bad['provenance']})")
     return "\n".join(lines)
 
 

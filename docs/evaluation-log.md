@@ -7,6 +7,72 @@ agreement, precision/recall over time.
 
 ---
 
+## 2026-09-06 (session 13) — Trend line, two negation fixes, and a third measurement that closes the harness's biggest blind spot
+
+### Precision/recall trend, both real-text and hand-written
+
+| session | change | hand-written P/R/F1 (22 cases) | real-text P/R/F1 (45 sentences) |
+|---|---|---|---|
+| 9 | irregular plurals fixed, harness replaced with the sampled 45-set | 1.000 / 0.938 / 0.968 | 0.500 / 1.000 / 0.667 |
+| 11 | `resolve_source` fixed (does not affect extraction numbers) | 1.000 / 0.938 / 0.968 | 0.500 / 1.000 / 0.667 |
+| 12 (ammu) | discovery fragments fixed | 1.000 / 0.938 / 0.968 | 0.500 / 1.000 / 0.667 *(see below — the harness could not see this fix)* |
+| **13** | **negation fixes (governing-clause + quantifier)** | 1.000 / 0.938 / 0.968 | **0.667 / 1.000 / 0.800** |
+
+Session 12's row is not a typo. That is the finding: a real, verified
+discovery-layer fix that measurably removed junk from every stored page
+produced **no visible change** in `measure_real_text_quality`, because that
+measurement re-runs extraction on sentence strings frozen at session 9's
+sampling time — discovery's actual current output never enters the
+calculation. See architecture-log session 13 for the full mechanism and the
+new `pipelineQuality` measurement built to close this.
+
+### The third measurement: `pipelineQuality`
+
+`backend/eval/pipeline_assertions.py` + `run_eval.measure_pipeline_quality()`
+run discovery and extraction FRESH over the stored corpus every time,
+checking page-level "this fact must be extractable somewhere on this page"
+and "this known-bad relation must appear nowhere on this page" assertions.
+Confirmed directly, before building anything, that this was necessary:
+running today's pipeline over the corpus already produces zero of the four
+historically-known false positives, while the frozen-string measurement
+above still reported two of them.
+
+Currently: 4/4 expected pairs found, 4/4 forbidden pairs absent, passing.
+Baseline-guarded (`test_pipeline_assertions_hold_against_todays_discovery_
+and_extraction`); guard verified to fire by temporarily disabling the
+negation checks and confirming two forbidden pairs reappeared.
+
+**Correction to this measurement's own first draft:** it initially copied
+`measure_extraction`'s 200-sentence-per-page production cap, which silently
+turned it into the same kind of blind instrument it was built to replace —
+a discovery fix that removes junk earlier in a page pushes real sentences
+to higher indices, and the two expected facts on the Wikipedia page moved
+from well under 200 to indices 214/231 after session 12's fix. A capped
+version would have reported that fix as a regression. This measurement now
+reads every sentence discovery finds; `measure_extraction`'s capped number
+still answers the separate, legitimate question of realistic crawl yield.
+
+### Negation fixes, measured
+
+Two false positives named by ammu in session 12 (real syntax, wrong
+polarity, neither a discovery fragment) — see architecture-log session 13
+for the mechanism. Real-text precision: 0.500 → 0.667 (2 of 4 false
+positives removed; the remaining 2 are the discovery-layer parser-confusion
+cases on corrupted fragments, not negation, and not this session's to fix).
+
+### Honest limitations, carried forward
+
+- The corpus is still 3 pages / 45 sampled real-text sentences. Both the
+  real-text sample and the new pipeline-assertion list would benefit from
+  growing past what one page each can exercise.
+- Two named, unfixed negation gaps: a lexically-negative governing verb
+  ("doubt", "deny") inverting its complement's negation back to true, and
+  passive-agent quantifier negation (implemented by the same logic as the
+  active case but not verified against a real sentence).
+- `pipelineQuality`'s expected/forbidden lists were hand-curated from
+  findings across sessions 9–13, not independently sampled the way Task C's
+  real-text set was. It inherits whatever bias that hand-curation carries.
+
 ## 2026-09-06 (session 9) — Real-text evaluation, two fixes, a trend line
 
 **Status:** implemented and tested. 219 backend tests pass (was 206 at the

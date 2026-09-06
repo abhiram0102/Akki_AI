@@ -4,6 +4,117 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 13) — Redirect caveat, two negation fixes, and the harness's frozen-string blind spot closed
+
+**Status:** implemented and tested. 238 backend tests pass.
+
+### The redirect caveat ammu flagged
+
+`resolve_source` (session 11) trusted ANY HTTP redirect outright. Ammu
+correctly pointed out this is too broad: an http->https upgrade or a bare
+trailing-slash normalisation is still the same page, not a search engine
+answering a question, and would make the caller trust a page that is really
+still a results listing. `brain_fetchers._meaningful_redirect` now compares
+the requested and final addresses (host, path stripped of one trailing
+slash, query) and reports `redirectedTo` only when they differ in more than
+that. No knowledge of any site's own redirect conventions — purely a
+structural comparison of the two addresses.
+
+### Two negation false positives, handed off by ammu, fixed
+
+Both were named in session 12 as "not discovery's" — real syntax, wrong
+polarity, neither a fragment:
+
+1. **Negation on a governing verb.** "One should NOT ASSUME that conceptual
+   plurality implies referential divergence" — the negation sits on
+   "assume"; the relation-bearing verb ("implies") is its `ccomp` and
+   carries no `neg` of its own, so the session-9 verb-local check couldn't
+   see it. `_is_negated` now walks up through consecutive `ccomp`/`xcomp`
+   links (spaCy's own labels for "this clause's truth belongs to its
+   governing verb"), not across a relative clause or a coordinated verb —
+   tested with a contrast case for each, since the boundary is exactly
+   where a naïve version could over- or under-propagate. **Named, not
+   fixed:** a governing verb that is itself lexically negative ("doubt",
+   "deny") inverts its complement's truth on its own, so negating THAT verb
+   asserts its complement rather than denying it. Fixing that needs a
+   lexicon of inherently-negative verbs, which is exactly the kind of table
+   this fix was built to avoid adding casually — left as a named gap.
+2. **Quantifier negation on the object.** "The Earth's atmosphere contained
+   ALMOST NO oxygen" — negation is a `det` child ("no") on the object noun,
+   never attaches to the verb, so no `neg`-based check can see it.
+   `_relation_negated_by_quantifier` checks the subject/object/passive-agent
+   token before it gets resolved into a concept string. The passive-agent
+   case is implemented by the same logic but unverified against a real
+   sentence (only the active-voice shape was actually found) — named as
+   such rather than assumed safe by symmetry.
+
+Verified against the real_text_gold sample directly, not just constructed
+test cases: real-text precision rose from 0.500 to 0.667 (both known
+negation false positives gone, nothing else changed).
+
+### The bigger fix: the harness's frozen-string blind spot, closed
+
+Ammu and I each independently found the same structural gap within an hour
+(session 11: the harness never exercises `resolve_source`; session 12: it
+cannot see a `brain_discovery` fix at all) and she handed the question of
+what to do about it back to me, since I built the harness.
+
+The mechanism: `gold_relations.GOLD` and `real_text_gold.REAL_TEXT_GOLD` both
+feed a FROZEN sentence string straight to `extract_dependencies`. That is
+correct for `GOLD` (a regression tripwire, deliberately one pattern per
+case) but wrong for measuring the real pipeline: removing a fragment from
+discovery does not remove it from a gold set built from an earlier run's
+output. Confirmed directly before designing anything: running TODAY's
+discovery + extraction over the stored corpus, all four historically-known
+false positives (two from session 12's fragments, two from this session's
+negation fixes) are absent — yet `measure_real_text_quality` still reported
+two of them as present, because it was quite literally re-running
+extraction on last week's already-corrupted sentence text.
+
+**`backend/eval/pipeline_assertions.py`** (new) + `run_eval.
+measure_pipeline_quality()`: runs discovery and extraction FRESH over each
+stored page and checks page-level claims robust to discovery reshaping the
+sentence list around them — an EXPECTED relation must appear SOMEWHERE on
+its page (not tied to one sentence index), a FORBIDDEN one must appear
+NOWHERE. Reported and baseline-guarded separately from the other two
+measurements; the guard was verified to actually fire (temporarily
+regressing the negation checks made two forbidden pairs reappear).
+
+**A design mistake caught before it shipped:** the first version copied
+`measure_extraction`'s 200-sentence-per-page cap. That cap exists to
+simulate a realistic crawl budget, which is the wrong thing for a
+page-completeness check — a discovery fix that removes junk EARLIER in a
+page shifts every real sentence after it to a lower index, and confirmed
+live, the Warburg/"range" sentences sat comfortably under 200 before
+session 12's fix and at indices 214/231/450 after it. A capped version of
+this check would have reported ammu's own improvement as a regression. Fixed
+by reading every sentence discovery finds for this measurement specifically,
+which is a different question from "what would a capped production crawl
+learn" (still answered, uncapped, by `measure_extraction`).
+
+Baseline re-recorded with justification: discovery/extraction yield numbers
+moved because of session 12's real fix (arXiv 18→30 sentences, Stanford
+835→712, Wikipedia 582→511 — fewer junk fragments, not less real content;
+all within the existing 20% tolerance and confirmed via the corpus table in
+session 12's own entry), and relation quality moved because of this
+session's negation fixes (real-text precision 0.500→0.667). Both are
+improvements, not regressions being masked.
+
+### Open questions
+
+1. The eval corpus is still 3 pages. The pipeline-assertion approach scales
+   to more pages/sources without inventing a new sampling strategy each
+   time — worth doing before the next round of discovery or extraction
+   changes needs evidence.
+2. Lexically-negative governing verbs ("doubt", "deny") are a named,
+   unfixed gap in `_is_negated` — flagged rather than guessed at with a new
+   hardcoded verb list.
+3. Passive-agent quantifier negation ("no oxygen was produced BY X") is
+   implemented in `_relation_negated_by_quantifier` but not verified against
+   a real sentence — only the active-voice shape was actually found live.
+
+---
+
 ## 2026-09-06 (session 12) -- Discovery fragments: fixed. Commit 4960424
 
 **Status:** built and measured. 231 backend tests pass (including lex's

@@ -198,19 +198,77 @@ def _true_subject_object(verb) -> tuple[str | None, str | None]:
 
 def _is_negated(token) -> bool:
     """True if the verb itself carries a dependency-parse negation ("not",
-    "never", "n't", ...). Found by real crawled text (Task C sampling):
-    "the cyanobacteria did not generate oxygen" was extracting
-    (cyanobacteria, oxygen) as if asserted, when the sentence asserts the
-    opposite. spaCy already labels this `neg` on the verb — no new lexicon,
-    just reading a dependency label the parser already produces.
+    "never", "n't", ...), OR sits as the clausal complement of a verb that
+    does. spaCy already labels both — `neg` on the negated verb, `ccomp`/
+    `xcomp` on a clause whose truth is under its governing verb's mood — so
+    this reads two existing dependency labels, not a new lexicon.
 
-    Scoped deliberately: this catches negation on the relation verb itself,
-    not negation on a *governing* clause ("one should NOT assume that X
-    implies Y" — the negation sits on "assume", not on "implies"). That
-    wider case is negation-scope resolution, a harder open problem, and is
-    left as a known limitation rather than half-solved here.
+    Found by real crawled text (Task C / session 12 sampling), two distinct
+    cases:
+      - "the cyanobacteria did NOT generate oxygen" — negation on the
+        relation verb itself.
+      - "one should NOT ASSUME that X implies Y" — the negation sits on the
+        governing verb ("assume"); the relation-bearing verb ("implies") is
+        its `ccomp` and carries no `neg` of its own. Walked up through
+        consecutive ccomp/xcomp links (the embedding can nest) so the
+        negation is inherited from whichever ancestor governs the clause's
+        truth. Deliberately narrow: negation does NOT propagate across a
+        relative clause (`acl`/`relcl`) or a coordinated verb (`conj`) —
+        only ccomp/xcomp genuinely put the embedded clause under the
+        governing verb's polarity, so "I know a woman who lives in Paris"
+        is not negated by an unrelated negated matrix verb.
+
+    Still not attempted: quantifier negation ("almost NO oxygen") — that is
+    a determiner on the object noun, not a verb-attached `neg`, and is
+    handled separately by `_relation_negated_by_quantifier`.
+
+    A known remaining false-negative source, not fixed here: a governing
+    verb that is ITSELF lexically negative ("doubt", "deny", "refuse")
+    inverts its ccomp's truth on its own, so negating that verb ("does NOT
+    DOUBT that X") asserts X rather than denying it — this walk would
+    wrongly suppress a relation the sentence actually asserts. Fixing that
+    needs knowing which verbs are inherently negative, which is exactly the
+    kind of lexicon this fix was deliberately built to avoid adding
+    casually. Rare enough in practice (and worse to guess at than to name)
+    that it is left as an open gap rather than a fourth hardcoded table.
     """
-    return any(child.dep_ == "neg" for child in token.children)
+    node = token
+    while node is not None:
+        if any(child.dep_ == "neg" for child in node.children):
+            return True
+        node = node.head if node.dep_ in ("ccomp", "xcomp") else None
+    return False
+
+
+def _negating_determiner(token) -> bool:
+    """True if `token` carries a "no" determiner ("almost no oxygen") --
+    negation expressed as a quantifier on the noun itself, invisible to
+    `_is_negated` because it never attaches to the verb at all.
+    """
+    return any(child.dep_ == "det" and child.lemma_.lower() == "no" for child in token.children)
+
+
+def _relation_negated_by_quantifier(verb) -> bool:
+    """True if the subject or object `_true_subject_object` would resolve
+    for `verb` carries a negating determiner ("the atmosphere contained
+    ALMOST NO oxygen" was extracting (atmosphere, oxygen) as if asserted).
+
+    Mirrors `_subject_of`/`_object_of`/`_passive_agent_of`'s own traversal
+    to find the same tokens they resolve into concept strings, checked
+    before that resolution discards the token. The passive-agent case
+    ("no oxygen was produced BY X") is included for the same reason the
+    active case is; only found live in the active-voice shape, so the
+    passive path is unverified against a real sentence rather than assumed
+    safe by symmetry alone.
+    """
+    for child in verb.children:
+        if child.dep_ in ("nsubj", "nsubjpass", "dobj", "obj") and _negating_determiner(child):
+            return True
+        if child.dep_ in ("prep", "agent"):
+            for grandchild in child.children:
+                if grandchild.dep_ == "pobj" and _negating_determiner(grandchild):
+                    return True
+    return False
 
 
 def extract_dependencies(sentence: str) -> list[tuple[str, str]]:
@@ -238,7 +296,7 @@ def extract_dependencies(sentence: str) -> list[tuple[str, str]]:
     for token in doc:
         if token.pos_ != "VERB":
             continue
-        if _is_negated(token):
+        if _is_negated(token) or _relation_negated_by_quantifier(token):
             continue
         lemma = token.lemma_.lower()
         subject, obj = _true_subject_object(token)

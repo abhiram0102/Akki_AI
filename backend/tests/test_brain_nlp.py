@@ -222,3 +222,52 @@ def test_passive_without_an_expressed_agent_is_unaffected():
     # reading (unchanged since before this session) still applies.
     result = extract_dependencies("The membrane may be tightly folded into cylindrical sheets.")
     assert ("membrane", "cylindrical sheet") in result
+
+
+# ── Negation, part 2: a governing verb and a quantified object (found via
+# ammu's real-text sampling in session 12, handed back to lex) ──────────────
+#
+# The first negation fix (above/session 9) only reads a `neg` dependency on
+# the relation verb itself. Two further cases slipped past it, both real
+# false positives on the sampled real-text set:
+
+def test_negation_on_a_governing_verb_suppresses_its_clausal_complement():
+    # "one should NOT ASSUME that X implies Y" -- the negation sits on
+    # "assume", not on "implies", which is assume's ccomp and carries no
+    # `neg` of its own. Was extracting (conceptual plurality, referential
+    # divergence) as if the sentence asserted it; the sentence denies it.
+    result = extract_dependencies(
+        "However, one should not assume that conceptual plurality implies "
+        "referential divergence."
+    )
+    assert result == []
+
+
+def test_negation_on_a_coordinated_verb_does_not_leak_to_its_conjunct():
+    # Contrast case: negation must NOT propagate to a coordinated verb
+    # ("and encryption protects data") just because the FIRST verb in the
+    # sentence happens to be negated -- only ccomp/xcomp genuinely share a
+    # governing verb's polarity; `conj` does not.
+    result = extract_dependencies(
+        "The firewall does not block traffic, and encryption protects data."
+    )
+    assert ("encryption", "data") in result
+    assert not any("traffic" in pair for pair in result)
+
+
+def test_quantifier_negation_on_the_object_suppresses_the_relation():
+    # "the atmosphere contained ALMOST NO oxygen" -- negation is a "no"
+    # determiner on the object noun, not anything attached to the verb, so
+    # the verb-local neg check cannot see it. Was extracting
+    # (earth atmosphere, oxygen) as if asserted; the sentence denies it.
+    result = extract_dependencies(
+        "The Earth's atmosphere contained almost no oxygen at that time."
+    )
+    assert result == []
+
+
+def test_quantifier_negation_does_not_affect_an_unquantified_object():
+    # Contrast case: an ordinary determiner-free (or "a"/"the") object must
+    # still produce its relation -- only "no" specifically suppresses it.
+    result = extract_dependencies("The atmosphere contained abundant oxygen.")
+    assert ("atmosphere", "abundant oxygen") in result

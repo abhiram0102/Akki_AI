@@ -64,6 +64,22 @@ def test_real_text_quality_has_not_regressed(results):
     )
 
 
+def test_pipeline_assertions_hold_against_todays_discovery_and_extraction(results):
+    """Unlike the two tests above, this one runs discovery+extraction FRESH
+    over the stored corpus rather than feeding a frozen sentence string to
+    the extractor -- see `pipeline_assertions` module docstring for why that
+    distinction is the whole point. No tolerance band: each pair is either
+    genuinely extractable from the page's real content or it is not, and
+    "close but not quite" is not a meaningful state for a single fact."""
+    p = results["pipelineQuality"]
+    assert not p["expectedMissing"], (
+        f"pipeline no longer extracts known-real relations: {p['expectedMissing']}"
+    )
+    assert not p["forbiddenPresent"], (
+        f"pipeline still extracts known-false relations: {p['forbiddenPresent']}"
+    )
+
+
 def test_every_page_still_yields_structure(results):
     """A page that stops producing text or sentences means discovery broke on
     a real document, which no unit test on synthetic input would catch."""

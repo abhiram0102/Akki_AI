@@ -6,13 +6,13 @@
         ">"
       ],
       "terminators": [
-        "(",
-        ")",
-        "]"
+        ".",
+        ";",
+        "?"
       ],
-      "sentences": 18,
+      "sentences": 30,
       "textChars": 5085,
-      "meanSentenceWords": 13.44,
+      "meanSentenceWords": 16.6,
       "links": 17,
       "sameHostLinks": 17
     },
@@ -24,9 +24,9 @@
       "terminators": [
         "."
       ],
-      "sentences": 835,
+      "sentences": 712,
       "textChars": 157041,
-      "meanSentenceWords": 18.8,
+      "meanSentenceWords": 19.78,
       "links": 19,
       "sameHostLinks": 19
     },
@@ -38,25 +38,25 @@
       "terminators": [
         "."
       ],
-      "sentences": 582,
+      "sentences": 511,
       "textChars": 129592,
-      "meanSentenceWords": 15.54,
+      "meanSentenceWords": 16.42,
       "links": 50,
       "sameHostLinks": 50
     }
   },
   "extraction": {
     "arxiv_attention": {
-      "concepts": 2,
-      "relations": 1
+      "concepts": 10,
+      "relations": 6
     },
     "stanford_consciousness": {
-      "concepts": 95,
-      "relations": 51
+      "concepts": 98,
+      "relations": 53
     },
     "wikipedia_photosynthesis": {
-      "concepts": 138,
-      "relations": 97
+      "concepts": 142,
+      "relations": 98
     }
   },
   "relationQuality": {
@@ -83,11 +83,11 @@
   "realTextQuality": {
     "cases": 45,
     "truePositives": 4,
-    "falsePositives": 4,
+    "falsePositives": 2,
     "falseNegatives": 0,
-    "precision": 0.5,
+    "precision": 0.6667,
     "recall": 1.0,
-    "f1": 0.6667,
+    "f1": 0.8,
     "disagreements": [
       {
         "page": "arxiv_attention",
@@ -112,31 +112,14 @@
             "fabric"
           ]
         ]
-      },
-      {
-        "page": "stanford_consciousness",
-        "index": 118,
-        "sentence": "However, one should not assume that conceptual plurality implies referential divergence.",
-        "expected": [],
-        "got": [
-          [
-            "conceptual plurality",
-            "referential divergence"
-          ]
-        ]
-      },
-      {
-        "page": "wikipedia_photosynthesis",
-        "index": 208,
-        "sentence": "[ 84 ] [ 85 ] Because the Earth's atmosphere contained almost no oxygen during the estimated development of photosynthesis, it is believed that the first photosynthetic cyanobacteria did not generate oxygen.",
-        "expected": [],
-        "got": [
-          [
-            "earth atmosphere",
-            "oxygen"
-          ]
-        ]
       }
     ]
+  },
+  "pipelineQuality": {
+    "expectedChecked": 4,
+    "expectedMissing": [],
+    "forbiddenChecked": 4,
+    "forbiddenPresent": [],
+    "passed": true
   }
 }

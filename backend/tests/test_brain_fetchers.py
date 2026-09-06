@@ -136,3 +136,26 @@ class TestFetch:
         )
         structure = await fetch_structure("https://example.org/search?q=term", client)
         assert structure["redirectedTo"] == "https://example.org/wiki/Term"
+
+    async def test_redirected_to_ignores_a_scheme_only_upgrade(self):
+        """An http -> https redirect is not a search engine answering a
+        question -- it is still the same page. Found worth checking (not yet
+        live-observed as a false positive) after the graphene fix landed."""
+        client = AsyncMock()
+        client.get.return_value = _mock_response(
+            "<p>Still the same page, just upgraded.</p>",
+            history=["http://example.org/wiki/Term"],
+            url="https://example.org/wiki/Term",
+        )
+        structure = await fetch_structure("http://example.org/wiki/Term", client)
+        assert structure["redirectedTo"] is None
+
+    async def test_redirected_to_ignores_a_bare_trailing_slash_normalisation(self):
+        client = AsyncMock()
+        client.get.return_value = _mock_response(
+            "<p>Still the same page, just normalised.</p>",
+            history=["https://example.org/wiki/Term"],
+            url="https://example.org/wiki/Term/",
+        )
+        structure = await fetch_structure("https://example.org/wiki/Term", client)
+        assert structure["redirectedTo"] is None
