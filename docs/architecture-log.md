@@ -4,6 +4,71 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 22) -- The verb is kept. Commit 0c0c24c.
+
+**Status:** built, deployed, crawler recording. 269 tests pass.
+
+    "Photosynthesis produces oxygen."  ->  (photosynthesis, produce, oxygen)
+    "Photosynthesis destroys oxygen."  ->  (photosynthesis, destroy, oxygen)
+
+Both were the identical edge until now. The parser found the verb, used it to
+choose a direction, and threw it away.
+
+### Why this, and not another formula
+
+Five ideas have been measured and rejected in two days, and they failed for one
+shared reason rather than five different ones:
+
+| idea | why it failed |
+|---|---|
+| type edges by verb | 380 verbs across 1,324 triples |
+| cluster verbs into relation types | wants millions of triples |
+| drop uninformative verbs | removing them fragmented a sparse graph |
+| embeddings in the ranking | too little structure to sharpen |
+| identity by similarity | too few shared neighbours to judge behaviour |
+
+All of them are the same sentence: **there is not enough data to induce
+structure from.** 55,783 concepts and roughly 62,000 edges is about one edge
+per concept. Nothing can be induced from a graph that thin.
+
+So this session stops inventing formulas and fixes the food supply. The crawler
+reads about 1,200 pages an hour; the only thing between here and a corpus that
+can answer the relation question is time, and time only counts if the
+observations are being written down.
+
+**This does not make the brain better today and is not claimed to.**
+
+### Design: a log beside the graph, not a schema change
+
+- The live 55,000-concept graph is untouched and needs no migration.
+- `backend/models.py` is untouched -- it carries another agent's uncommitted
+  work, so `brain_relations` is created with plain SQL from the service rather
+  than declared as a model. Unusual; that is the reason.
+- `extract_relations` shares one implementation with `extract_dependencies`,
+  which still returns pairs. No caller changes, and nothing is parsed twice --
+  parsing is the bottleneck at ~10ms a sentence, so a second pass would halve
+  the crawl.
+
+### Rejected
+
+- **Storing the verb as an edge property in Neo4j.** Needs a migration on a
+  live graph the crawler is actively writing to, and parallel array properties
+  are awkward to update. The question this data exists to answer is a week
+  away; a log costs nothing and risks nothing.
+- **Dynamic relationship types per verb.** The clean Neo4j answer, but it needs
+  APOC and it commits to relation types being verbs -- which is the hypothesis
+  under test, not a settled question.
+
+### Open questions
+
+1. Whether relation typing helps at 100x the triples. Unknown, and now
+   answerable in about a week.
+2. Nothing consumes `brain_relations` yet. It is a log, deliberately.
+3. The five rejected ideas should be re-run once the log is large -- they were
+   rejected at this data scale, not in principle.
+
+---
+
 ## 2026-09-06 (session 21) -- The identity result was wrong. Retracted. Commit 9415857.
 
 **Status:** session 20's headline is withdrawn. Nothing was applied to the live
