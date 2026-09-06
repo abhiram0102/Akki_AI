@@ -13,3 +13,8 @@ data/brain_meaning/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Local secrets - never commit
+.env
+.env.local
+.env.*.local

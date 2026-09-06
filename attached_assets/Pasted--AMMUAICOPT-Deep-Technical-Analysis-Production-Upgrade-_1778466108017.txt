@@ -748,7 +748,7 @@ volumes:
 ## STEP 11 — SECURITY & SAFETY ANALYSIS
 
 ### S-01: Hardcoded Google API Key in `.env.example` (CRITICAL)
-**Finding:** `.env.example` contains `GOOGLE_API_KEY="AIzaSyDpLbmD4ZWDBkWegxLxPJny5dCBX9LU0NQ"`. This appears to be a real API key committed to version control (the file is in the zip archive which was committed to git). If this key is real and valid, it is already compromised.
+**Finding:** `.env.example` contains `GOOGLE_API_KEY="<REDACTED-ROTATE-THIS-KEY>"`. This appears to be a real API key committed to version control (the file is in the zip archive which was committed to git). If this key is real and valid, it is already compromised.
 
 **Action:** Immediately rotate this key in Google Cloud Console. Never commit real keys to any file under version control, even example files.
 
