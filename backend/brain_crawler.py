@@ -21,11 +21,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from backend.database import AsyncSessionLocal
 from backend.models import BrainFrontier, BrainVisitedPage, BrainDeadLetter, BrainStats
 from backend.services import brain_learn
+from backend.services import brain_relations
 from backend.services.neo4j_service import get_driver, ensure_schema
 from backend.services.brain_fetchers import (
     RobotsChecker, RateLimiter, fetch_structure,
 )
-from backend.services.brain_nlp import extract_dependencies
+from backend.services.brain_nlp import extract_relations
 
 logger = logging.getLogger("akki.brain_crawler")
 
@@ -177,7 +178,11 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
     # grammatical floor for extract_dependencies to find a subject-verb-object
     # triple ("Fire causes heat" is exactly 3).
     sentences = [s for s in sentences if len(s.split()) >= 3]
-    pairs, sentences_read = _read_adaptively(sentences, extract_dependencies)
+    # The verb is kept alongside the pair: the graph is unchanged, and the
+    # observation log gains what the graph throws away. One parse either way --
+    # parsing is the bottleneck, so nothing is read twice.
+    triples, sentences_read = _read_adaptively(sentences, extract_relations)
+    pairs = [(subject, obj) for subject, _, obj in triples]
 
     word_freq: Counter = Counter()
     edge_counts: Counter = Counter()
@@ -188,6 +193,8 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
 
     async with neo4j_driver.session() as session:
         await brain_learn.apply_to_graph(session, word_freq, edge_counts)
+
+    await brain_relations.record(pg_session, triples)
 
     await pg_session.execute(
         pg_insert(BrainVisitedPage).values(
@@ -257,6 +264,8 @@ async def main() -> None:
 
     neo4j_driver = get_driver()
     await ensure_schema()
+    async with AsyncSessionLocal() as schema_session:
+        await brain_relations.ensure_schema(schema_session)
 
     robots = RobotsChecker()
     limiter = RateLimiter(min_interval_seconds=1.0)

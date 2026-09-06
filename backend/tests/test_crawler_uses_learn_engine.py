@@ -30,7 +30,7 @@ class TestCrawlerUsesLearnEngine:
         neo4j_driver = _fake_neo4j_driver()
         pg_session = _fake_pg_session()
 
-        # extract_dependencies is mocked here (not the real spaCy model) —
+        # extract_relations is mocked here (not the real spaCy model) —
         # its own behaviour is covered by backend/tests/test_brain_nlp.py;
         # this test only needs to verify crawl_one_page wires the resulting
         # Counters into apply_to_graph, so we don't want it flaking on
@@ -38,8 +38,10 @@ class TestCrawlerUsesLearnEngine:
         with patch.object(brain_crawler, "fetch_structure", AsyncMock(
             return_value={"text": "Fire causes heat.", "sentences": ["Fire causes heat."],
                           "links": [], "delimiters": ("<", ">"), "terminators": ["."]}
-        )), patch.object(brain_crawler, "extract_dependencies", MagicMock(
-            return_value=[("fire", "heat")]
+        )), patch.object(brain_crawler, "extract_relations", MagicMock(
+            # (subject, relation, object): the crawler drops the relation when
+            # building graph pairs and records it separately.
+            return_value=[("fire", "cause", "heat")]
         )), patch.object(brain_learn, "apply_to_graph", AsyncMock(
             return_value={"new_concepts": 2, "new_edges": 1}
         )) as mock_apply:
