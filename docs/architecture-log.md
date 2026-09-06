@@ -4,6 +4,94 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 20) -- Identity resolution triples the brain. The first thing that worked.
+
+**Status:** built, controlled, committed (7a42335). 260 tests pass.
+
+### The result
+
+    no merging                          hit  6.0%   lift  36.5x over chance
+    merge 3,237 semantic duplicates     hit 21.9%   lift 109.2x
+    CONTROL: merge 3,237 RANDOM pairs   hit  7.3%   lift  36.9x
+
+**The control is the result.** Merging shrinks the vocabulary, which makes
+prediction easier on its own, so a raw hit rate proves nothing -- these are
+lifts over chance on each graph's own vocabulary. Random merging does not move
+the number. Merging the right pairs roughly triples it.
+
+Pairs found, with no synonym list anywhere: `nucleus` / `nucleus accumben`,
+`gene` / `tsix gene`, `cloud` / `cirrocumulus cloud`, and `route business` /
+`business route` -- the same two words in a different order, arriving as two
+separate nodes.
+
+### It took four failures to get here
+
+The falsifiability metric from session 19 paid for itself by killing bad ideas
+in an afternoon instead of after weeks of building. In order:
+
+1. **Type edges by verb** -- no change, 11.2% vs 11.2%. 380 verbs over 1,324
+   triples, dominated by `have/use/include`.
+2. **Cluster verbs into relation types** -- informativeness worked and found
+   the light verbs with no list written down; the clustering produced
+   incoherent groups. Distributional relation induction wants millions of
+   triples, not thousands.
+3. **Drop the uninformative verbs** -- WORSE than dropping verbs at random
+   (2.2% vs 2.7%, against 5.0% keeping everything). `have/use/include` are
+   generic because they connect many things, and connectivity is what
+   inference runs on.
+4. **Blend embedding similarity into the ranking** -- noise. 10.0% -> 10.5% at
+   best, worse at higher weights, 3.5% for meaning alone.
+
+Identity was the fifth idea and the first that worked. Note that (4) and the
+winner both use the same embeddings: what mattered was not the signal but where
+it was applied -- to the GRAPH rather than to the SCORING.
+
+### Two errors caught before they became conclusions
+
+**`en_core_web_md` has a pruned vector table**: 684,830 words share 20,000
+vector rows, 34 words each. It reports `train` and `bridge` as identical at
+cosine exactly 1.0, and `dog`/`cat` likewise. The first merge run used it and
+produced nonsense. Any similarity work in this project must use `lg` (342,918
+rows). This also qualifies session 10's model comparison -- md was rejected on
+parse quality, but its vectors are separately unusable.
+
+**A raw hit rate reported 6.3% -> 50.3%** and was withdrawn: that was the
+vocabulary collapsing, not the brain learning. Lift over each graph's own
+chance rate is the only honest comparison when a change alters the candidate
+space.
+
+### The meaning layer, diagnosed completely
+
+`chromadb` is declared in `pyproject.toml` and **absent from
+`backend/requirements.txt`**, which is what the Docker image installs from. So
+it was never in the container. `record_contexts` catches the ImportError and
+logs a warning, so an entire architectural layer failed silently for 35,000+
+pages. That is why `oxygen` (32 edges) and `dioxygen` (1) are separate nodes.
+
+Notably, the fix for identity did NOT need ChromaDB -- static vectors were
+enough. Whether the sense layer earns its cost is now a separate question with
+a way to answer it.
+
+### Known limits
+
+- 0.85 merges some hypernym/hyponym pairs (`cloud` / `cirrocumulus cloud`).
+  Related, not identical; it evidently helps connectivity anyway.
+- Technical synonyms with poor vectors are MISSED: `oxygen`/`dioxygen` sit at
+  0.33. The example that motivated the work is not solved by it.
+- Measured on prediction, not on answer quality. Those are different claims.
+- Nothing is applied to the live graph yet -- this is the resolver, not a
+  migration.
+
+### Open questions
+
+1. Applying identity to the live 51k-concept graph needs a migration that
+   merges nodes and sums edge counts. Not yet written.
+2. Whether merging helps ANSWERS as much as it helps prediction.
+3. `oxygen`/`dioxygen` needs a signal static vectors do not carry -- possibly
+   the sense layer, if it is ever installed.
+
+---
+
 ## 2026-09-06 (session 19) -- The brain gets a test it can fail, and that test kills three of my own ideas
 
 **Status:** `brain_prediction.py` built and committed (0df39d4, 5 tests). Three
