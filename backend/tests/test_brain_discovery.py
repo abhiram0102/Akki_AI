@@ -10,6 +10,7 @@ that are not punctuation an English writer would type.
 If structure were hardcoded, those cases would return nothing. They pass, so
 the structure came from the bytes.
 """
+from collections import Counter
 from backend.services import brain_discovery as bd
 
 
@@ -196,12 +197,119 @@ def test_a_frequent_terminator_beats_a_rare_but_consistent_artifact():
 def test_code_and_data_are_not_read_as_statements():
     """Script and data embedded in a page sit OUTSIDE the markup delimiters,
     so they survive separation and would otherwise be learned from as prose."""
+    subjects = ["leaf", "stem", "root", "frond", "thallus", "blade"]
     text = (
         'var className="client-js vector-feature-enabled", wgPageAssessments={"Algae":'
         '{"class":"B","importance":"Top"}}, x=0. '
-        + " ".join(f"Photosynthesis converts light into chemical energy in step {i}."
-                   for i in range(6))
+        + " ".join(f"Photosynthesis converts light into chemical energy in the {s}."
+                   for s in subjects)
     )
     sentences = bd.split_sentences(text)
     assert any("Photosynthesis converts light" in s for s in sentences)
     assert not any("wgPageAssessments" in s or "className" in s for s in sentences)
+
+
+def test_a_sentence_ending_in_a_single_digit_is_missed():
+    """A known and deliberate cost of `_MIN_CLOSING_WORD`, pinned here so it
+    stays visible.
+
+    A statement ending on a one-digit number is indistinguishable, by anything
+    local to the boundary, from a numbered heading like "History of the issue
+    2." -- both are a lone digit, a full stop, a space and a capital. Admitting
+    one admits the other, and on the stored corpus admitting both put two dozen
+    heading fragments back into the encyclopedia page. Headings are far more
+    common in crawled pages than sentences ending in a bare digit, so the
+    trade is made deliberately in that direction.
+
+    This test asserts the CURRENT behaviour, not the desired one. If a later
+    change makes both cases separable -- by looking at the document's structure
+    rather than at the boundary alone -- this test should start failing, and
+    the right response is to delete it, not to restore the limitation."""
+    text = " ".join(f"The reaction releases oxygen at stage {i}." for i in range(6))
+    sentences = bd.split_sentences(text)
+    assert sentences == [] or all("stage" not in s for s in sentences)
+
+
+def test_headings_numbered_in_sequence_are_not_read_as_statements():
+    """The other side of the same trade: a run of numbered headings must not
+    arrive at the extractor as sentences, because a parser will invent
+    subject-verb structure from any noun phrase handed to it."""
+    text = (
+        "Concepts of Consciousness 2. History of the issue 3. "
+        "Consciousness as an entity 4. The descriptive question 5."
+    )
+    sentences = bd.split_sentences(text, terminators={"."})
+    assert not any("History of the issue" == s.strip(" .") for s in sentences)
+
+
+def test_an_abbreviation_does_not_end_a_statement():
+    """The byte that ends sentences also sits inside "e.g." and "U.S.".
+    Splitting on the byte alone cuts those in half and hands the extractor a
+    fragment ending in a stray letter, which is where two of the corpus's
+    false positives came from."""
+    text = (
+        "Perception counts as a conscious state because it involves qualia, "
+        "e.g. the taste of wine. The U.S. Congress met later that year. "
+        "Consciousness remains difficult to define precisely."
+    )
+    sentences = bd.split_sentences(text)
+    assert not any(s.rstrip(".").endswith(" e") for s in sentences)
+    assert not any(s.rstrip(".").endswith(" U.S") for s in sentences)
+    assert any("taste of wine" in s for s in sentences)
+
+
+def test_a_bracketing_pair_is_not_mistaken_for_a_terminator():
+    """A bracket is half of a pair: something else occurs about as often and
+    nests with it. A terminator has no such partner. That difference is what
+    tells them apart here -- no byte is named, so a document that brackets with
+    some other pair of symbols is judged the same way.
+
+    Without this, a page carrying little prose lets its brackets outscore the
+    real terminator, and the reader gets navigation fragments instead of the
+    one paragraph on the page worth reading."""
+    prose = " ".join(
+        f"The system converts light into chemical energy in the {part} "
+        f"(as reported in {1990 + i}). "
+        for i, part in enumerate(["leaf", "stem", "root", "frond", "blade", "thallus"])
+    )
+    terminators = bd.discover_sentence_terminators(prose)
+    openers = {t for t in terminators if bd._bracket_partner(
+        prose, t, Counter(c for c in prose if not c.isalnum() and not c.isspace()))}
+    assert not openers, f"a bracketing byte was taken for a terminator: {openers}"
+
+
+def test_a_standalone_glyph_is_not_a_terminator_however_well_it_behaves():
+    """The measured failure this guards against: on a real Wikipedia page a
+    jump-back arrow precedes a capital letter in 95 out of 95 appearances,
+    which is better boundary behaviour than the full stop manages on the same
+    page. Position statistics alone therefore prefer the arrow.
+
+    What separates them is that punctuation is written against the word it
+    follows and a standalone glyph never is. The arrow here is not named; it is
+    excluded because it is attached to a word in none of its appearances."""
+    glyph = "\u2191"
+    text = " ".join(
+        f"Light is absorbed by the reaction centre in the {part}. {glyph} "
+        f"Energy then moves through the chain of carriers."
+        for part in ["leaf", "stem", "root", "frond", "blade", "thallus"]
+    )
+    terminators = bd.discover_sentence_terminators(text)
+    assert glyph not in terminators
+    assert "." in terminators
+
+
+def test_the_split_uses_the_same_test_that_found_the_terminator():
+    """The bug this closes: terminators were found by looking at context and
+    then applied to every occurrence of the byte, context discarded. The two
+    have to agree, or the split cuts in places the search would never have
+    called boundaries."""
+    text = (
+        "Photosynthesis converts light into chemical energy in the leaf. "
+        "Version 2.5 of the model was released. The reaction then continues."
+    )
+    sentences = bd.split_sentences(text, terminators={"."})
+    # The period inside "2.5" is the same byte as the one ending the sentence
+    # before it. Only the context tells them apart, so the version number must
+    # arrive whole.
+    assert any("Version 2.5 of the model was released" in s for s in sentences)
+    assert not any(s.endswith("Version 2.") for s in sentences)

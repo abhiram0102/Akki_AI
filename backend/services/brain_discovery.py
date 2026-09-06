@@ -86,7 +86,48 @@ _DELIMITER_CANDIDATES = 10
 # considered at all, and must then score at least this share of the best
 # candidate's score (see `discover_sentence_terminators`).
 _TERMINATOR_EVIDENCE = 3
-_TERMINATOR_SHARE = 0.5
+# Lowered from 0.5 once bracketing pairs stopped competing for the title. The
+# threshold existed to keep a frequent non-terminator from winning, and a
+# bracket was the thing that used to win; with those excluded structurally it
+# can be loose enough to admit a second real terminator. Measured: on the two
+# prose pages nothing changes at all (the full stop still wins alone, the comma
+# scores 0.18 of it), while on a landing page that is mostly navigation the
+# full stop is no longer crowded out by a question mark repeated seventeen
+# times in menu labels -- which is the difference between reading that page's
+# abstract and reading none of it.
+_TERMINATOR_SHARE = 0.25
+
+# Punctuation is written tight against the word it follows; a standalone glyph
+# is not. A terminator must therefore be attached to a word at least this often
+# across the document. The bar is deliberately near the floor because the
+# separation turns out to be categorical rather than gradual, which is what
+# makes it safe to rely on: measured over the stored corpus, the full stop is
+# attached 34%, 70% and 77% of the time on the three pages, while the jump-back
+# arrow (95 boundary-like occurrences), the en dash, and the bracket bytes are
+# attached in EXACTLY none of theirs. Nothing real sits in between, so this
+# separates the two populations without being tuned to sit between them.
+_MIN_TERMINATOR_ATTACHMENT = 0.1
+
+# A closing token must be at least this long for the byte after it to end a
+# statement. A single character before a full stop is an initial or an
+# abbreviation ("e.g.", "U.S.") or a section number ("2."), none of which ends
+# anything.
+#
+# KNOWN COST, measured rather than assumed: this also refuses a real sentence
+# that ends on a one-digit number ("...in step 4."). Allowing those back was
+# tried and rejected -- it returned 24 numbered-heading fragments to the
+# encyclopedia page, because a heading like "History of the issue 2." is
+# indistinguishable from such a sentence by anything local to the boundary.
+# Real pages carry far more numbered headings than sentences ending in a bare
+# digit, and precision is the binding constraint, so the trade goes this way.
+# `test_a_sentence_ending_in_a_single_digit_is_missed` pins the cost so it
+# stays visible instead of being rediscovered later.
+_MIN_CLOSING_WORD = 2
+
+# Two bytes are a bracketing pair, rather than either being a terminator, when
+# they occur about equally often and nest properly. Counts are never exactly
+# equal on a real page, because documents get truncated and authors typo.
+_PAIR_COUNT_RATIO = 0.9
 
 # A reference a document offers to a reader carries readable text; this is how
 # many letters must follow a span before it counts as one.
@@ -105,6 +146,19 @@ _MAX_SENTENCE_WORDS = 40
 # statement's tokens to be ordinary words removes it without naming scripts,
 # data formats, or any element.
 _MIN_WORD_RATIO = 0.6
+
+# A ratio alone is an average, and an average hides a lump: a line of script
+# followed by a long sentence can carry enough words overall to pass while
+# still handing the extractor a block of code.
+#
+# What separates the two is how LONG the unbroken non-word stretch is in
+# characters, not how many tokens it spans. Counting tokens cannot do it: a
+# fragment of script is four tokens and a pair of citation markers left
+# between two sentences ("[ 84 ] [ 85 ] Because the Earth's...") is six, so a
+# token count would keep the script and throw away the prose. Measured in
+# characters those same two are about 107 and about 13, which is not a close
+# call. The threshold sits between them with room on both sides.
+_MAX_NON_WORD_RUN = 40
 
 
 def _candidate_delimiters(raw: str) -> list[str]:
@@ -255,6 +309,100 @@ def separate(raw: str, delimiters: tuple[str, str] | None = None,
     return text, markup
 
 
+def _closes_a_word(text: str, index: int) -> bool:
+    """Whether the byte at `index` sits at the end of a whole word.
+
+    A statement ends after a word. A section number ("4.") and an abbreviation
+    ("e.g.", "U.S.") end after a single character, which is what tells them
+    apart without either being named here. Closing marks between the word and
+    the byte are stepped over, so a sentence finishing on a parenthetical
+    citation -- "(Tye 1995)." -- still ends on the word "1995".
+    """
+    cursor = index - 1
+    while cursor >= 0 and (text[cursor].isspace() or not text[cursor].isalnum()):
+        cursor -= 1
+    if cursor < 0:
+        return False
+    start = cursor
+    while start >= 0 and text[start].isalnum():
+        start -= 1
+    return (cursor - start) >= _MIN_CLOSING_WORD
+
+
+def _opens_a_statement(text: str, index: int) -> bool:
+    """Whether what follows the byte at `index` starts a new statement.
+
+    Whitespace, then a capital. Marked-off material in between is stepped over
+    so that a citation sitting between two sentences does not hide the
+    boundary, and digits are stepped over only when they are inside such marks
+    -- a bare number after a full stop is the next entry in a list of numbered
+    headings, not the next sentence.
+    """
+    cursor = index + 1
+    if cursor >= len(text) or not text[cursor].isspace():
+        return False
+    marked = False
+    while cursor < len(text):
+        char = text[cursor]
+        if char.isspace():
+            cursor += 1
+        elif not char.isalnum():
+            marked = True
+            cursor += 1
+        elif char.isdigit() and marked:
+            cursor += 1
+        else:
+            break
+    return cursor < len(text) and text[cursor].isupper()
+
+
+def _is_boundary(text: str, index: int) -> bool:
+    """The one definition of a statement boundary in this module.
+
+    Both the search for terminators and the split that uses them go through
+    here. They disagreed before: terminators were found by looking at context
+    and then applied to every occurrence of the byte regardless of context,
+    which cut "e.g." in half and shredded numbered headings into fragments.
+    """
+    return _closes_a_word(text, index) and _opens_a_statement(text, index)
+
+
+def _bracket_partner(text: str, char: str, counts: Counter) -> str | None:
+    """The byte that brackets with this one, if there is one.
+
+    A terminator ends a statement; a bracket is half of a pair and always has a
+    partner that appears about as often and nests with it. `(` and `.` are told
+    apart by that property alone, so neither has to be written down. This
+    matters on a page carrying little prose, where brackets can otherwise
+    out-score the full stop and the reader is left with navigation fragments
+    instead of the one paragraph worth reading.
+    """
+    here = counts[char]
+    if not here:
+        return None
+    for other, there in counts.items():
+        if other == char or not there:
+            continue
+        if min(here, there) / max(here, there) < _PAIR_COUNT_RATIO:
+            continue
+        if _nests(text, char, other) or _nests(text, other, char):
+            return other
+    return None
+
+
+def _nests(text: str, opener: str, closer: str) -> bool:
+    """Whether two bytes nest: never closing before opening, and closing evenly."""
+    depth = 0
+    for char in text:
+        if char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
 def discover_sentence_terminators(text: str) -> set[str]:
     """Which bytes end sentences in this text, learned from where they sit.
 
@@ -266,17 +414,16 @@ def discover_sentence_terminators(text: str) -> set[str]:
     """
     followed_by_boundary: Counter = Counter()
     occurrences: Counter = Counter()
+    attached: Counter = Counter()
 
     for index, ch in enumerate(text):
         if ch.isalnum() or ch.isspace():
             continue
         occurrences[ch] += 1
-        rest = text[index + 1:index + 3]
-        if not rest or not rest[0].isspace():
-            continue
-        following = rest[1:2]
-        if following and following.isupper():
+        if _is_boundary(text, index):
             followed_by_boundary[ch] += 1
+            if index and text[index - 1].isalnum():
+                attached[ch] += 1
 
     if not followed_by_boundary:
         return set()
@@ -303,6 +450,16 @@ def discover_sentence_terminators(text: str) -> set[str]:
     for ch, hits in followed_by_boundary.items():
         if hits < _TERMINATOR_EVIDENCE:
             continue
+        if _bracket_partner(text, ch, occurrences):
+            continue
+        # A byte that never touches a word is a symbol the page displays, not
+        # punctuation that closes a sentence. This is what keeps a navigation
+        # arrow out even on a page where it behaves like a boundary every
+        # single time it appears -- the case the scoring comment above
+        # describes, and which the share threshold alone stopped catching once
+        # it was loosened.
+        if attached[ch] / hits < _MIN_TERMINATOR_ATTACHMENT:
+            continue
         lift = (hits / occurrences[ch]) / base_rate
         scores[ch] = hits * lift
 
@@ -325,9 +482,11 @@ def split_sentences(text: str, terminators: set[str] | None = None) -> list[str]
     else:
         candidate = []
         current: list[str] = []
-        for ch in text:
+        for index, ch in enumerate(text):
             current.append(ch)
-            if ch in terminators:
+            # The byte alone is not the boundary. It has to sit where a
+            # boundary sits, which is the same test that found it.
+            if ch in terminators and _is_boundary(text, index):
                 candidate.append("".join(current).strip())
                 current = []
         tail = "".join(current).strip()
@@ -346,11 +505,14 @@ def _is_prose(sentence: str) -> bool:
     tokens = sentence.split()
     if not tokens:
         return False
-    words = sum(
-        1 for t in tokens
-        if t.strip(".,;:()[]{}\"'").isalpha()
-    )
-    return words / len(tokens) >= _MIN_WORD_RATIO
+    is_word = [t.strip(".,;:()[]{}\"'").isalpha() for t in tokens]
+    run = longest = 0
+    for token, word in zip(tokens, is_word):
+        run = 0 if word else run + len(token) + 1
+        longest = max(longest, run)
+    if longest > _MAX_NON_WORD_RUN:
+        return False
+    return sum(is_word) / len(tokens) >= _MIN_WORD_RATIO
 
 
 def _address_runs(fragment: str, delimiters: tuple[str, str] | None = None) -> list[str]:
