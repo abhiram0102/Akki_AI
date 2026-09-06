@@ -4,6 +4,108 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 14) -- Convergence validated against a real graph for the first time. Commit dd9098e
+
+**Status:** built and measured against live data. 242 backend tests pass.
+
+### The live graph exists, and that changed what was worth doing
+
+Earlier sessions recorded "nothing has run at scale; no live Postgres/Neo4j in
+this environment". That is out of date and was worth checking rather than
+inheriting: the full stack has been up 18 hours, and the crawler with it.
+
+    49,677 concepts        60,829 edges        0 isolated nodes
+
+Stage 4 of the charter -- convergence as a signal of hidden truth -- has been
+implemented for several sessions and had **never been run against a real
+graph**. It has now been.
+
+### Counting origins does not work
+
+Seeding photosynthesis, consciousness and penicillin (depth 2) returned:
+
+    3x mechanism   3x dna   2x process   2x type   2x number   2x presence
+    2x magnetic field   2x year   2x selection   2x development   2x level   2x form
+
+Ranked by origin count that is one undifferentiated list. The top hubs of the
+graph are all generic nouns -- "example" (deg 630), "time" (444), "case" (436),
+"place", "number", "year", "century" -- so this was predictable in hindsight.
+It was not asserted, it was measured against 40 random seed triples:
+
+| reached from RANDOM seeds | | reached from random seeds |
+|---|---|---|
+| example 48% | | dna **0%** |
+| time 38% | | mechanism **0%** |
+| case 35% | | magnetic field **0%** |
+| number / way 20% | | study, change, instance **0%** |
+
+"time" is reached from 38% of random seed triples and "dna" from none of them.
+One is a finding and the other is a common noun, and the origin count is
+identical.
+
+### The fix: score against chance, the way the project already does elsewhere
+
+`background_reachability()` measures how often each concept is reached from a
+random seed -- the graph's own noise floor. `_surprise()` then scores each
+convergence point by the probability that this many independent seeds all
+arrive there by chance. This is the same idea as the permutation test already
+used for sense counts in `brain_meaning`: compare the observation against what
+chance produces, instead of trusting a raw count.
+
+Result on the live graph:
+
+| before (origin count) | after (against chance) |
+|---|---|
+| mechanism, dna, process, type, number, presence, magnetic field, year, selection, development, level, form | **dna** (6.38), selection (3.78), subject (3.78), mechanism (3.73), magnetic field (3.34), presence (2.83) ... |
+
+"dna" moves to first. "year", "form", "number" and "type" drop out entirely.
+And the ranking now performs an inversion the old one could not: **"selection"
+and "subject", reached from TWO origins, outrank "mechanism", reached from
+three** -- because three origins finding something 5.7% of random seeds reach is
+less surprising than two finding something 0.75% of them do.
+
+### Charter compliance
+
+The floor is measured from the graph and no word is ever named. A stopword list
+would be exactly the hardcoded knowledge this project exists to avoid, would be
+wrong for any graph not built from English prose, and could not adapt as the
+graph grows. `test_the_noise_floor_is_measured_from_the_graph_not_a_word_list`
+pins this: the same concept must score as noise in one graph and as signal in
+another, purely from how the graph behaves.
+
+### A second finding, unfixed and worth naming
+
+Seeding insulin / mitochondria / graphene returned **nothing at all** at depth
+2. The graph averages 2.4 edges per concept, which is sparse. Convergence
+therefore fails in two opposite ways depending on the seeds: generic hubs
+dominate on well-connected topics, and nothing is reachable at all on sparse
+ones. The first is now handled; the second is a crawl-density problem, not a
+ranking problem, and no amount of scoring fixes it.
+
+### Rejected
+
+- **A stopword or hub blocklist.** Fastest fix, forbidden by the charter, and
+  genuinely wrong: "dna" and "mechanism" would both look like hubs by degree,
+  yet one is a finding. Only the random-seed comparison separates them.
+- **Ranking by degree instead of sampling.** Degree is a proxy for
+  reachability, not a measure of it, and it cannot see graph shape -- two nodes
+  of equal degree can differ greatly in how much of the graph reaches them.
+
+### Open questions
+
+1. The noise floor costs 2.5s to measure (200 seeds) once per process, then is
+   cached in memory and the query itself is 60ms. It should be persisted and
+   invalidated as the graph grows, rather than recomputed per process.
+2. `_BACKGROUND_MIN_DEGREE = 3` decides which concepts can be drawn as random
+   seeds. Reasoned, not calibrated: a degree-1 concept reaches almost nothing
+   and would understate the floor.
+3. Convergence returns nothing on sparse seeds. Needs crawl density, and there
+   is still no evidence for or against the underlying "convergence = hidden
+   truth" hypothesis -- this session made the ranking trustworthy, which is a
+   precondition for testing the hypothesis, not a test of it.
+
+---
+
 ## 2026-09-06 (session 13) — Redirect caveat, two negation fixes, and the harness's frozen-string blind spot closed
 
 **Status:** implemented and tested. 238 backend tests pass.
