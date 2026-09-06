@@ -74,3 +74,36 @@ def test_no_synonym_list_exists_in_the_module():
         assert f'"{pair}"' not in body and f"'{pair}'" not in body, (
             f"{pair!r} is named in the module body -- that is a synonym list"
         )
+
+
+def test_antonyms_are_the_known_failure_of_vector_identity():
+    """Pinned because it is a property of the method, not a threshold to tune.
+
+    Distributional vectors place opposites together, because opposites occur in
+    identical contexts. On the live graph, mutual-nearest matching at 0.85
+    proposed `north`==`south`, `east`==`west`, `november`==`september` and
+    `democrats`==`republicans`. Any future identity rule must be checked
+    against cases of this shape before it is believed, whatever its aggregate
+    score says."""
+    import numpy as np
+    # Two concepts that occupy nearly the same contexts and mean the opposite.
+    opposite = {"north": [1.0, 0.0, 0.0], "south": [0.99, 0.1, 0.0]}
+
+    class _Doc:
+        def __init__(self, v):
+            self.vector = np.array(v, dtype="float32")
+            self.vector_norm = float((self.vector @ self.vector) ** 0.5)
+            self.has_vector = True
+
+    import backend.services.brain_identity as bi
+    original = bi._vectors
+    bi._vectors = lambda: (lambda w: _Doc(opposite.get(w, [0.0, 0.0, 1.0])))
+    try:
+        pairs = bi.duplicate_pairs(["north", "south"])
+    finally:
+        bi._vectors = original
+    assert pairs, (
+        "cosine similarity no longer pairs antonyms -- if a later change made "
+        "identity behaviour-based rather than vector-based, delete this test "
+        "rather than restoring the weakness it documents"
+    )

@@ -1,38 +1,58 @@
-"""One thing, one node.
+"""One thing, one node -- ATTEMPTED, MEASURED, AND NOT ACHIEVED.
 
-The graph stores a node per surface form, so the same thing arrives many times
-under many names and its knowledge is split between them. `nucleus` and
-`nucleus accumben` are separate. So are `route business` and `business route`,
-which are the same two words in a different order. Everything learned about one
-is unreachable from the other, and the graph looks larger than it is while
-being thinner everywhere.
+**Do not apply this to a graph.** It is kept because what it rules out is worth
+more than another untested idea, and because the retraction below is the most
+useful thing in this file.
 
-Merging them is the single largest measured improvement found in this project.
-Against held-out relations (`brain_prediction.measure_knowledge`):
+The problem is real. The graph stores a node per surface form, so `nucleus` and
+`nucleus accumben` are separate and everything learned about one is unreachable
+from the other. `oxygen` has 32 edges and `dioxygen` has 1.
 
-    no merging                          lift  36.5x over chance
-    merge 3,237 semantic duplicates     lift 109.2x
-    CONTROL: merge 3,237 RANDOM pairs   lift  36.9x
+WHAT WAS CLAIMED, AND WHY IT WAS WRONG
+---------------------------------------
+An earlier version of this file reported that merging semantic duplicates
+raised prediction from 36.5x chance to 109.2x -- roughly tripling it -- with a
+random-merge control at 36.9x that appeared to rule out artifacts.
 
-The control is what makes that a result rather than an artifact. Merging
-shrinks the vocabulary, which makes prediction easier on its own, so raw hit
-rate cannot show anything -- these are lifts over chance on each graph's own
-vocabulary. Random merging moves the number not at all; merging the RIGHT
-pairs roughly triples it.
+That claim is WITHDRAWN. Inspecting what it actually merged on the live graph:
 
-Two mistakes made on the way here are worth not repeating:
+    'new'  <- additional training, algebraic geometry, analysis, antivirus software
+    'gas'  <- acetic acid, amino acid, arachidonic acid, atom
+    'gust' <- chemical energy, efficiency, electrical energy
+    'new': 2 edges -> 5,172 edges
 
-  * `en_core_web_md` packs 684,830 words into 20,000 vector rows -- 34 words
-    share each row -- so it reports `train` and `bridge` as identical, with a
-    cosine of exactly 1.0. Any similarity work must use `lg` (342,918 rows).
-  * A first attempt measured raw hit rate and appeared to show a jump from
-    6.3% to 50.3%. That was the vocabulary collapsing, not the brain learning.
+Union-find transitivity chains a~b and b~c into a==c until unrelated concepts
+share one node. Predicting a node joined to everything is trivial, which is
+where the lift came from. Concepts with enough edges to answer well went DOWN,
+3,503 -> 3,024.
 
-Known limits, stated rather than discovered later: the threshold merges some
-hypernym/hyponym pairs (`cloud` with `cirrocumulus cloud`) which are related
-but not identical, and it MISSES technical synonyms whose vectors are poor --
-`oxygen` and `dioxygen` sit at 0.33 and stay separate, which was the example
-that motivated the work.
+The aggregate metric AND its control both missed this. Only looking at the
+output caught it. That is the lesson: a controlled number is not a substitute
+for reading what the code produced.
+
+THREE RULES TRIED, ALL UNSAFE OR TRIVIAL
+-----------------------------------------
+1. Cosine + transitivity: blobs, as above.
+2. Cosine + mutual-nearest, no transitivity: 1,209 clean-looking pairs, but on
+   single words it merges ANTONYMS -- `north`/`south`, `east`/`west`,
+   `november`/`september`, `democrats`/`republicans`. Distributional vectors
+   place opposites together because opposites occur in identical contexts. This
+   is a property of the method, not a threshold to tune.
+3. Lexical permutation and containment: safe (zero antonyms, no blobs) but
+   yields six pairs on 12,198 concepts, and half are wrong anyway --
+   `time constant`/`constant time`, `toll road`/`road toll` and
+   `ground coffee`/`coffee ground` are distinct concepts that happen to be
+   anagrams.
+
+WHAT WOULD ACTUALLY BE NEEDED
+------------------------------
+Evidence that two forms are the same thing must come from how they BEHAVE in
+the graph -- whether they take the same neighbours, in the same roles -- rather
+than from how they look or where a language model puts them. That is a real
+piece of work and it is not done here.
+
+`duplicate_pairs` and `resolve` remain because they are the measured negative
+result. Their output must be INSPECTED, never applied wholesale.
 """
 import os
 
