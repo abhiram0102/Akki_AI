@@ -4,6 +4,111 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 12) -- Discovery fragments: fixed. Commit 4960424
+
+**Status:** built and measured. 231 backend tests pass (including lex's
+`resolve_source` work from session 11, which landed alongside this).
+
+### The bug: discovery and splitting disagreed with each other
+
+`discover_sentence_terminators` learns that a byte ends sentences by looking at
+where it *sits* -- followed by whitespace, then a capital. `split_sentences`
+then cut at **every occurrence of that byte**, context thrown away. The same
+module decided `.` was a terminator for contextual reasons and then applied it
+context-free.
+
+That one inconsistency produced most of the debris reaching the parser:
+
+- `e.g.` and `U.S.` cut in half, leaving fragments ending in a stray letter
+- numbered headings shredded into "History of the issue 2."
+- a CSS remnant and a `{{Cite web ...}}` template read as statements
+
+Both halves now go through a single `_is_boundary`, so they cannot drift apart
+again.
+
+### Three further properties, each read off the document
+
+**A bracket is half of a pair.** A terminator has no partner; a bracket has one
+that occurs about as often and nests with it. No byte is named, so a document
+that brackets with other symbols is judged the same way. This mattered: on the
+arXiv page the brackets outscored the full stop, and the page yielded menu
+labels instead of its abstract.
+
+**Punctuation attaches to the word it follows.** The measured case the existing
+code already warned about: a Wikipedia jump-back arrow precedes a capital in
+**95 of 95** appearances -- better boundary behaviour than the full stop manages
+on that page (34%). Position statistics alone prefer the arrow. What separates
+them is that the arrow is attached to a word in **exactly none** of its
+appearances, while the full stop never falls below 34% on any page. The two
+populations are categorically separated rather than close, which is what makes
+this safe to rely on instead of tuned to fit.
+
+**Prose contains no long unbroken run of non-words.** The existing word-ratio is
+an average, and an average hides a lump -- a line of script followed by a long
+sentence passes on ratio while still handing the extractor code. Measured in
+*characters*, not tokens: a script fragment is ~107, a pair of citation markers
+left between two sentences is ~13. Counting tokens cannot separate them (4 vs 6)
+and would have thrown away the prose in order to keep the script.
+
+### Measured on the stored corpus
+
+| page | sentences before | after | debris before | after |
+|---|---|---|---|---|
+| arXiv abstract page | 18 | 30 | 9 | 11 |
+| Stanford encyclopedia | 835 | 712 | 10 | **0** |
+| Wikipedia article | 582 | 511 | 13 | **1** |
+
+Both fragments named as false-positive causes in the real-text gold set
+(`arxiv_attention_2` nav chrome, `stanford_consciousness_81` mis-cut) are no
+longer emitted. All four relation-bearing gold sentences still are. **The arXiv
+abstract is now read at all** -- previously that page produced navigation and
+none of the one paragraph on it worth learning from.
+
+### The measurement gap this exposed, which matters more than the fix
+
+**The eval harness scores the parser on frozen strings, so it cannot see a
+discovery fix at all.** `measure_real_text_quality` feeds the 45 sampled
+sentences straight to `brain_nlp.extract_dependencies`. Those sentences are
+fixed text: removing a fragment from the pipeline does not remove it from the
+gold set. Real-text precision stays 0.500 whether or not that fragment still
+reaches production.
+
+So the baseline passing is **not** evidence this worked, and re-recording it to
+"show" an improvement would have been meaningless. The evidence is the corpus
+measurement above. Between this and lex's finding that the harness never
+exercises `resolve_source` at all, the pattern is clear: the harness measures
+one stage well and the rest of the pipeline not at all.
+
+### Rejected
+
+- **A boilerplate filter** (drop statements whose word bigrams recur across the
+  page). Built and measured: it did not remove the arXiv navigation it was built
+  for, and it dropped ~10% of statements from both prose pages for no
+  demonstrated gain. Not shipped -- unproven complexity is worse than a named
+  open item.
+- **Allowing a statement to end on a one-digit number.** Tried, measured,
+  reverted: it returned two dozen numbered-heading fragments to the encyclopedia
+  page, because nothing local to the boundary separates "...in step 4." from
+  "History of the issue 2.". Real pages carry far more headings than such
+  sentences. The cost is pinned by
+  `test_a_sentence_ending_in_a_single_digit_is_missed` rather than hidden.
+
+### Open questions
+
+1. **The eval measures the parser, not the pipeline.** A discovery-layer output
+   measurement is the highest-value addition to the harness now.
+2. arXiv navigation chrome (11 fragments) still survives. It is grammatical
+   ("What is Connected Papers?"), so no boundary or prose test rejects it. It is
+   boilerplate, and boilerplate needs a cross-page or cross-section signal.
+3. `_TERMINATOR_SHARE` was loosened 0.5 -> 0.25, safe only because bracketing
+   pairs and standalone glyphs are now excluded structurally. On the prose pages
+   the comma scores 0.18 of the full stop, so the margin is real but thinner.
+4. Two of the four real-text false positives are **not** discovery's: both are
+   negation semantics ("should not assume that X implies Y", "contained almost
+   no oxygen"). Handed to lex with the evidence.
+
+---
+
 ## 2026-09-06 (session 11) — resolve_source: found live, fixed, and re-verified live
 
 **Status:** implemented and tested. All tests in this change's own files pass
