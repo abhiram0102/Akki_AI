@@ -4,6 +4,80 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 21) -- The identity result was wrong. Retracted. Commit 9415857.
+
+**Status:** session 20's headline is withdrawn. Nothing was applied to the live
+graph. 261 tests pass.
+
+### What was claimed, and what was actually happening
+
+Session 20 reported that merging semantic duplicates raised prediction from
+36.5x chance to 109.2x, with a random-merge control at 36.9x that appeared to
+rule out an artifact. Then the merge was inspected on the live graph:
+
+    'new'  <- additional training, algebraic geometry, analysis, antivirus software
+    'gas'  <- acetic acid, amino acid, arachidonic acid, atom
+    'gust' <- chemical energy, efficiency, electrical energy
+    'new':  2 edges -> 5,172 edges
+
+Union-find transitivity chains `a~b` and `b~c` into `a==c` until unrelated
+concepts share one node. Predicting a node joined to everything is trivial, and
+that is where the lift came from. Concepts with enough edges to answer well
+went DOWN, 3,503 -> 3,024 -- a number available before the claim was made and
+not checked.
+
+**The aggregate metric and its control both missed this. Only reading the
+output caught it.** That is the lesson of the session, and it is the second
+time in two days that a confident wrong answer came from measuring a proxy: the
+first was reporting a raw hit-rate jump that was the vocabulary collapsing.
+
+### Three identity rules, none of which survives
+
+| rule | result |
+|---|---|
+| cosine + transitivity | blobs, as above |
+| cosine + mutual-nearest, no transitivity | 1,209 tidy pairs, but merges ANTONYMS |
+| lexical permutation / containment | safe but 6 pairs on 12,198 concepts, half wrong |
+
+The antonym failure is the important one. On single words the rule proposed
+`north`==`south`, `east`==`west`, `november`==`september`,
+`democrats`==`republicans`. Distributional vectors place opposites together
+because opposites occur in identical contexts. **That is a property of the
+method, not a threshold to tune**, and it is now pinned by a test so a future
+rule has to be checked against cases of that shape.
+
+The lexical rule looked promising -- zero antonyms, no blobs -- until its six
+pairs were read: `time constant`/`constant time`, `toll road`/`road toll` and
+`ground coffee`/`coffee ground` are distinct concepts that happen to be
+anagrams. Two of six were genuine.
+
+### What is actually still true
+
+- `brain_prediction.measure_knowledge` stands. The instrument is sound; it was
+  applied to a corrupted graph and reported that graph honestly.
+- The identity PROBLEM is real and unsolved: `oxygen` 32 edges, `dioxygen` 1,
+  cosine 0.33 between them.
+- Five ideas have now been measured and rejected: verb typing, verb clustering,
+  dropping uninformative verbs, embedding-blended ranking, and identity
+  merging. That is the metric doing its job.
+
+### What would be needed
+
+Evidence that two forms name one thing must come from how they BEHAVE in the
+graph -- whether they take the same neighbours in the same roles -- not from
+how they look or where a language model puts them. Behaviour-based identity is
+a real piece of work and is not started.
+
+### Open questions
+
+1. Behaviour-based identity, above.
+2. Whether ANY change so far has improved answers, as opposed to prediction.
+   Nothing has.
+3. The eval harness still cannot see the crawler or the graph -- both remaining
+   measurement gaps.
+
+---
+
 ## 2026-09-06 (session 20) -- Identity resolution triples the brain. The first thing that worked.
 
 **Status:** built, controlled, committed (7a42335). 260 tests pass.
