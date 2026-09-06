@@ -4,6 +4,106 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 19) -- The brain gets a test it can fail, and that test kills three of my own ideas
+
+**Status:** `brain_prediction.py` built and committed (0df39d4, 5 tests). Three
+ontology experiments run against it; all three negative; the reasons are worth
+more than the ideas were.
+
+### The measuring instrument
+
+Every metric this project had counted what the brain COLLECTED -- pages,
+concepts, relations, sentences. A graph of pure noise scores well on all of
+them; it only has to be large. So: hide a relation the brain already learned,
+and ask the rest of the graph to reconstruct it. If it comes back, the fact was
+IMPLIED by what else it knows. If not, a sentence was memorised.
+
+    200 hidden relations, candidate space 6,060
+    recovered in top ten  16/200 = 8.0%
+    chance                          0.165%
+    lift                             48.5x
+
+Real structure, forty-eight times better than guessing -- and wrong nine times
+in ten. Both halves belong in view.
+
+### What it immediately proved about the current graph
+
+A bake-off of five scoring formulas over the same hidden relations:
+
+| formula | hit@10 |
+|---|---|
+| common neighbours | 6.0% |
+| **adamic-adar (rare shared neighbours)** | **8.0%** |
+| + weight by stored `g2` edge strength | 4.0% |
+| + penalise hub candidates | 1.3% |
+| **direction-aware (a->mid->cand)** | **0.0%** |
+
+Two findings. The `g2` strength statistic **halves** prediction, so it is not
+carrying knowledge. And following edge DIRECTION scores **exactly zero** -- the
+graph's directions do not compose. That is the hardest evidence yet that
+`CO_OCCURS` is an association, not a relation.
+
+### Three ontology experiments, all negative
+
+**1. Type relations by the verb.** No change at all: 11.2% typed vs 11.2%
+untyped. Diagnosis in the data -- 1,324 triples produced 380 distinct verbs,
+3.5 triples each, dominated by `have/use/include/find`. Raw verbs are too
+sparse and too generic to infer with. This is the OpenIE fragmentation problem:
+produce/generate/yield/release become four unrelated relations.
+
+**2. Induce relation types by clustering verbs on shared arguments.** The
+informativeness half WORKED, and worked well: ranking verbs by how far their
+argument distribution departs from the corpus found the light verbs with no
+list written down -- `have(1.83) use(1.96) make(2.81) include(2.93)
+provide(3.09)`. The clustering half FAILED: the top of the ranking is merely
+RARE verbs (`tíðendi`, Old Norse parse noise), and the clusters are incoherent
+(`{accelerate, alter, analyze, approach, constitute, consult, detonate}`).
+Distributional relation clustering wants millions of triples; 4,080 is not
+close.
+
+**3. Drop the uninformative verbs from the graph.** The surprise, and the most
+useful result of the session:
+
+| graph | hit@10 |
+|---|---|
+| keep everything | **5.0%** |
+| drop 10% least informative | 2.3% |
+| drop 20% | 2.2% |
+| drop 35% | 2.3% |
+| CONTROL: drop 20% at RANDOM | 2.7% |
+
+Dropping the "meaningless" verbs is worse than dropping verbs at random. The
+control rules out "fewer edges, worse score" -- informativeness was actively
+selecting the most valuable edges to delete. `have/use/include` are generic
+BECAUSE they connect many things, and connectivity is what inference runs on.
+
+### What this changes
+
+The ontology instinct is right and the implementation is not. Relation
+semantics cannot be induced from thousands of triples; the methods that do this
+work at millions. Rather than a cleverer formula on the same thin data, the
+lever that adds meaning WITHOUT needing scale is the one already specified in
+the charter and already built -- and it has never run.
+
+### The layer that has never executed
+
+`brain_meaning.record_contexts` is called from `brain_learn.py` and **nowhere
+in the crawler**. The ChromaDB store does not exist on disk in either
+container. Across 35,000+ crawled pages, word-sense induction, disambiguation
+and sense filtering are dead code in production. That is why `oxygen` (32
+edges) and `dioxygen` (1) are separate nodes: the layer that could merge them
+has never seen a crawled page.
+
+### Open questions
+
+1. Wiring the meaning layer into the crawler adds embedding cost to a crawler
+   already bound by parsing. Measure before enabling -- the session-15 mistake
+   was assuming a cost instead of measuring it.
+2. Whether relation typing helps at 100x the triples is untested, not refuted.
+   Experiment 1 says raw verbs do not help at THIS scale.
+
+---
+
 ## 2026-09-06 (session 18) -- Adaptive reading measured on real pages: it does nothing. Claim withdrawn.
 
 **Status:** measured properly at last. The mechanism is kept, but the case made
