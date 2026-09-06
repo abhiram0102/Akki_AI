@@ -105,7 +105,7 @@ class TestAdaptiveReading:
         def extract(sentence):
             index = int(sentence.split()[-1])
             band = index // 100
-            return [("a", "b")] * yields.get(band, 0)
+            return [("a", "verb", "b")] * yields.get(band, 0)
         return extract
 
     @staticmethod
@@ -116,7 +116,7 @@ class TestAdaptiveReading:
         """The Wikipedia shape: rich opening, then references and see-also,
         which cost NLP time and yield nothing."""
         extract = self._extract_from({0: 5, 1: 4, 2: 3, 3: 0, 4: 0, 5: 0})
-        pairs, read = brain_crawler._read_adaptively(self._page(600), extract)
+        pairs, read, _ctx = brain_crawler._read_adaptively(self._page(600), extract)
         assert read < 600, "read the whole page including the dead tail"
         assert read >= brain_crawler._MIN_READ
 
@@ -124,7 +124,7 @@ class TestAdaptiveReading:
         """The essay shape. This is the case a fixed cap gets wrong: the page
         is at its most productive exactly where the old cap stopped."""
         extract = self._extract_from({0: 2, 1: 2, 2: 4, 3: 5, 4: 2, 5: 0})
-        pairs, read = brain_crawler._read_adaptively(self._page(600), extract)
+        pairs, read, _ctx = brain_crawler._read_adaptively(self._page(600), extract)
         assert read > 200, (
             f"stopped at {read} sentences, discarding the most productive part "
             "of the page"
@@ -135,14 +135,14 @@ class TestAdaptiveReading:
         """A page whose first block happens to be thin must not be abandoned
         on that evidence -- which is what `_MIN_READ` protects against."""
         extract = self._extract_from({0: 0, 1: 3, 2: 4, 3: 4})
-        pairs, read = brain_crawler._read_adaptively(self._page(400), extract)
+        pairs, read, _ctx = brain_crawler._read_adaptively(self._page(400), extract)
         assert read >= brain_crawler._MIN_READ
         assert pairs, "abandoned a productive page because it opened quietly"
 
     def test_a_page_that_never_stops_producing_is_still_bounded(self):
         """One page cannot be allowed to consume the whole crawl."""
         extract = self._extract_from({i: 5 for i in range(40)})
-        _, read = brain_crawler._read_adaptively(self._page(4000), extract)
+        _, read, _ctx = brain_crawler._read_adaptively(self._page(4000), extract)
         assert read <= brain_crawler._MAX_READ
 
     def test_an_extraction_failure_does_not_abort_the_page(self):
@@ -150,8 +150,8 @@ class TestAdaptiveReading:
         def extract(sentence):
             if sentence.endswith("7"):
                 raise ValueError("unparseable")
-            return [("a", "b")]
-        pairs, read = brain_crawler._read_adaptively(self._page(300), extract)
+            return [("a", "verb", "b")]
+        pairs, read, _ctx = brain_crawler._read_adaptively(self._page(300), extract)
         assert read == 300
         assert len(pairs) == 300 - 30  # every sentence ending in 7
 
@@ -204,10 +204,10 @@ def test_an_unproductive_page_now_stops_before_the_old_cap():
     pages that are mostly navigation."""
     def extract(sentence):
         index = int(sentence.split()[-1])
-        return [("a", "b")] * (4 if index < 50 else 0)
+        return [("a", "verb", "b")] * (4 if index < 50 else 0)
 
     sentences = [f"sentence number {i}" for i in range(600)]
-    _, read = brain_crawler._read_adaptively(sentences, extract)
+    _, read, _ctx = brain_crawler._read_adaptively(sentences, extract)
     assert read < 200, (
         f"read {read} sentences of a page that stopped producing after 50; "
         "the old fixed cap would have read 200"
@@ -385,3 +385,122 @@ class TestCuriosityDoesNotPropagate:
         """A blank source_type would violate the column's NOT NULL intent and
         make the row unattributable."""
         assert brain_crawler.discovered_source_type("curiosity:unknown")
+
+
+class TestPruningGivesNewKnowledgeProbation:
+    """The pruner was deleting what the brain had just learned.
+
+    Every 200 pages -- roughly ten minutes -- it ran:
+
+        MATCH (:Concept)-[r:CO_OCCURS]->() WHERE r.count < 2 DELETE r
+        MATCH (c:Concept) WHERE NOT (c)-[:CO_OCCURS]-() DELETE c
+
+    A concept read on exactly ONE page has most of its edges at count 1. They
+    were deleted, the concept was orphaned, then the concept was deleted too.
+    A single read of something new mostly evaporated within ten minutes unless
+    the crawler happened to meet it again first.
+
+    Measured live by running the pruner's own predicates as a count, rather
+    than inferring it: the next prune would have deleted 7,751 edges and 6,461
+    concepts -- 12% of a 55,225-concept graph -- including 12 of the 27 edges
+    `quasicrystal` had just been read to obtain. `quasicrystal` had in fact
+    already been deleted once this way, despite its page being read with 200
+    sentences forty minutes earlier.
+
+    This is the bottom of the bucket the curiosity loop pours into. Curiosity
+    exists to read things the brain does not know, and a thing it does not know
+    is by definition one it has seen once.
+
+    The dust the pruner was built to control is real (its comment records 83%
+    of the graph going edgeless). So thin edges are still swept -- just not
+    before they have had a fair chance to be seen a second time.
+    """
+
+    def test_a_thin_edge_is_not_deleted_the_moment_it_is_written(self):
+        cypher = brain_crawler.thin_edge_prune_cypher()
+        assert "last_updated" in cypher, \
+            "sweeping by count alone deletes knowledge written seconds ago"
+
+    def test_a_thin_edge_is_still_swept_once_it_has_had_its_chance(self):
+        """Probation, not amnesty. The dust problem was real."""
+        cypher = brain_crawler.thin_edge_prune_cypher()
+        assert "DELETE" in cypher.upper() and "r.count" in cypher
+
+    def test_a_freshly_learned_concept_is_not_deleted_as_an_orphan(self):
+        """Orphan deletion is what actually loses the concept, so it needs the
+        same probation -- otherwise a concept survives edge-pruning only to be
+        swept by the next statement."""
+        cypher = brain_crawler.orphan_prune_cypher()
+        assert "first_seen" in cypher, \
+            "a concept learned moments ago is not dust"
+
+    def test_both_prunes_use_one_probation_window(self):
+        """Two different windows would let a concept lose its edges under one
+        rule and survive as an orphan under the other."""
+        assert brain_crawler.PROBATION_HOURS > 0
+        window = f"{brain_crawler.PROBATION_HOURS}"
+        assert window in brain_crawler.thin_edge_prune_cypher()
+        assert window in brain_crawler.orphan_prune_cypher()
+
+    async def test_pruning_failure_does_not_stop_the_crawl(self):
+        class _Boom:
+            def session(self): raise RuntimeError("neo4j unavailable")
+        await brain_crawler._prune_low_value_edges(_Boom())  # must not raise
+
+
+class TestTheCrawlerFeedsTheMeaningLayer:
+    """`record_contexts` was reachable only from the learn-on-demand path.
+
+    `brain_learn` records, for every concept it extracts, the sentence it came
+    from -- that store is what `brain_meaning` clusters into word senses. The
+    CRAWLER never called it. So the meaning layer saw only the handful of
+    concepts learned by an `/ask` miss, and none of the 40,000 pages the
+    crawler read.
+
+    Combined with two other defects in the same feature -- chromadb absent from
+    the image, and the store on an unmounted per-container path -- word senses
+    could not have worked in production under any circumstances. That is why
+    "what causes inflation" answered with `universe` and
+    `thermodynamic equilibrium`: cosmological inflation and economic inflation
+    were one undifferentiated node.
+    """
+
+    def test_reading_returns_the_sentence_each_concept_came_from(self):
+        """Sense discovery clusters CONTEXTS, so a bare concept list is not
+        enough -- the sentence has to survive the parse."""
+        sentences = ["fire causes heat", "heat causes expansion"]
+
+        def extract(s):
+            w = s.split()
+            return [(w[0], w[0], w[-1])]
+
+        _triples, _read, contexts = brain_crawler._read_adaptively(sentences, extract)
+
+        assert contexts["fire"] == ["fire causes heat"]
+        assert "heat causes expansion" in contexts["heat"]
+
+    def test_a_concept_seen_in_two_sentences_keeps_both(self):
+        """One sentence per concept would make every word single-sense by
+        construction, which is the bug this exists to fix."""
+        sentences = ["fire burns wood", "fire warms house"]
+
+        def extract(s):
+            w = s.split()
+            return [(w[0], w[1], w[-1])]
+
+        _t, _r, contexts = brain_crawler._read_adaptively(sentences, extract)
+
+        assert len(contexts["fire"]) == 2
+
+    async def test_crawling_a_page_records_those_contexts(self):
+        """The end of the wire: what the crawler read reaches the sense store."""
+        recorded = {}
+
+        def _record(concept, sentences):
+            recorded[concept] = sentences
+            return len(sentences)
+
+        with patch.object(brain_crawler.brain_meaning, "record_contexts", _record):
+            brain_crawler._record_page_contexts({"fire": ["fire causes heat"]})
+
+        assert recorded == {"fire": ["fire causes heat"]}

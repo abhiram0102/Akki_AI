@@ -44,6 +44,14 @@ python-dotenv>=1.0.0
 
 # ── Brain Engine ──────────────────────────────────────────────────────────
 neo4j>=5.24.0
+
+# The meaning layer (brain_meaning.py). Declared in pyproject.toml since it was
+# built, but the Docker images install from THIS file, so it has never once run
+# in production: every answer logged "Could not compute senses for '<x>': No
+# module named 'chromadb'" and fell back to a single sense per word. That is
+# why asking what causes inflation returned cosmological inflation's edges
+# (universe, thermodynamic equilibrium) mixed into the economic sense.
+chromadb>=0.5.0
 spacy>=3.7.0
 feedparser>=6.0.11
 beautifulsoup4>=4.12.0

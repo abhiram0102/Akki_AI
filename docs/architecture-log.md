@@ -4,6 +4,140 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 24) -- The pruner was deleting what curiosity had just learned. And the meaning layer had never run.
+
+**Status:** built, deployed, verified live. 291 tests pass.
+
+Session 23 fixed the curiosity loop so the brain reads what it does not know.
+This session found what happened to that reading afterwards.
+
+### The bucket had no bottom
+
+Every 200 pages -- roughly ten minutes -- the crawler ran:
+
+    MATCH (:Concept)-[r:CO_OCCURS]->() WHERE r.count < 2 DELETE r
+    MATCH (c:Concept) WHERE NOT (c)-[:CO_OCCURS]-() DELETE c
+
+A concept read on exactly ONE page has most of its edges at count 1. They were
+deleted, the concept was orphaned, then the concept was deleted too.
+
+Measured by running the pruner's own predicates as a count rather than
+inferring it:
+
+| the next prune would delete | |
+|---|---|
+| edges | **7,751** |
+| concepts orphaned and then deleted | **6,461** (12% of a 55,225-concept graph) |
+| `quasicrystal`'s own edges | **12 of 27** |
+
+`quasicrystal` had already been lost this way once: its page was read with 200
+sentences at 08:29, and by 10:15 the concept did not exist in the graph. It was
+re-read to confirm, and came back with 27 edges of which 12 were immediately
+due for deletion again.
+
+The single cleanest piece of evidence:
+
+    MATCH ()-[r:CO_OCCURS]->() WHERE r.count < 2
+    RETURN min(r.last_updated), max(r.last_updated)
+    -> 2026-09-06T10:25:23Z, 2026-09-06T10:37:12Z
+
+**The oldest thin edge in the entire graph was twelve minutes old.** Nothing
+thin ever survived long enough to be seen a second time, so nothing thin could
+ever become thick. Curiosity reads what the brain does not know, and what it
+does not know it has by definition seen once -- so curiosity's output was the
+pruner's preferred target.
+
+### Probation, not amnesty
+
+The dust the pruner exists to control is real; its own comment records 83% of
+the graph going edgeless without it. So thin edges are still swept -- just not
+before they have had a chance not to be thin.
+
+`thin_edge_prune_cypher` and `orphan_prune_cypher` both now require the row to
+be older than `PROBATION_HOURS`. Both, deliberately: orphan deletion is what
+actually loses the concept, so protecting edges alone would buy nothing --
+a concept would survive one statement and die to the next.
+
+The existing `last_updated` on edges and `first_seen` on concepts carried
+enough. No schema change, no migration.
+
+Verified live: the new predicates are valid Cypher and select **0** rows where
+the old ones select 7,751 and 6,461.
+
+`PROBATION_HOURS = 24` is about 29,000 pages at the current rate. It is a
+reasoned default, NOT calibrated against how long an edge actually takes to
+reach count 2 -- and that measurement was impossible before now, because the
+old pruner was deleting the history it would need. Same status as the curiosity
+thresholds, for the same reason.
+
+### The meaning layer had never run, for four independent reasons
+
+Ask "what causes inflation" and the brain answered with `universe` and
+`thermodynamic equilibrium` -- cosmological inflation's edges served for the
+economic sense. `brain_meaning.py` was built in session 4 to solve exactly
+this. It has never once run in production. Four separate defects, each
+sufficient alone:
+
+1. **`chromadb` was not installed.** Declared in `pyproject.toml`; the Docker
+   images install from `backend/requirements.txt`, which did not list it. Every
+   answer logged `Could not compute senses for '<x>': No module named
+   'chromadb'` and fell back to one sense per word. Now declared where the
+   images actually read from.
+
+2. **The store was a per-container relative path.** `BRAIN_MEANING_PATH`
+   defaulted to `./data/brain_meaning` with no volume, so the crawler wrote
+   senses to its own container filesystem and the backend read a different,
+   empty one -- and both were destroyed on every restart. Now a shared named
+   volume at `/data/brain_meaning`, mounted in both services.
+
+3. **The crawler never recorded contexts.** `record_contexts` was reachable
+   only from `brain_learn`, the learn-on-demand path. Sense discovery therefore
+   saw the handful of concepts learned by an `/ask` miss and none of the 40,000
+   pages the crawler had read. `_read_adaptively` now returns the sentence each
+   concept was found in -- gathered during the parse it already does, since
+   parsing is the bottleneck and re-walking would halve the crawl.
+
+4. **A test fixture had drifted from production.** `TestAdaptiveReading`'s fake
+   extractor returned pairs; `extract_relations` has returned triples since
+   session 22. The tests were asserting against a contract production no longer
+   had. Corrected to triples.
+
+Verified live: `chromadb 1.5.9` imports in the backend, the crawler writes
+`chroma.sqlite3` to the shared volume, and the backend lists the same file.
+
+**This does not yet change any answer.** The store starts empty -- the whole
+history of contexts was lost to defects 1-3 -- and a word needs
+`MIN_CONTEXTS_FOR_SENSES = 6` before it has senses at all. Senses will appear
+as the crawler re-reads. Claimed as wiring restored, not as a better brain.
+
+### Rejected
+
+- **Deleting the pruner outright.** The dust problem it was built for is real
+  and documented. Probation keeps the control and removes the collateral.
+- **A pages-read counter instead of wall-clock probation.** Truer -- it
+  measures exposure rather than time, and survives the crawler being stopped --
+  but it needs a new property on every edge and a migration on a live graph the
+  crawler is actively writing to. `last_updated` already existed.
+- **Recording contexts in a second pass over the page.** Parsing is ~10ms a
+  sentence and is the crawl's bottleneck; a second pass would halve throughput
+  for data the first pass already has in hand.
+
+### Open questions
+
+1. `PROBATION_HOURS` is uncalibrated. The measurement it needs -- the
+   distribution of time-to-second-sighting -- becomes possible for the first
+   time now that thin edges survive long enough to be observed. Worth taking in
+   a week.
+2. Steady-state thin-edge population is now ~24h of accumulation rather than
+   ~10 minutes. At current rates that is a few hundred thousand extra edges.
+   Neo4j will hold it comfortably; whether it degrades traversal quality is
+   unmeasured.
+3. Senses still do not partition graph edges (session 7 rejected that, and the
+   reasoning stands). The graph remains single-sense; only answer-time
+   filtering is sense-aware.
+4. Carried from session 23: effectiveness still measures sentence count, not
+   whether the gap closed.
+
 ## 2026-09-06 (session 23) -- Curiosity had never once run. Four defects, all production-only.
 
 **Status:** built, deployed, verified live. 283 tests pass. Commit 643c342.

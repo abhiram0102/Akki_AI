@@ -1,58 +1,153 @@
-version: '3.8'
+# ── AKKI AI — Docker Compose ──────────────────────────────────────────────────
+
+#
+#  Services:
+#    frontend  — Nginx serving built React SPA, proxies /api → backend
+#    backend   — FastAPI (uvicorn), connects to db + FCC on host
+#    db        — PostgreSQL 16 with pgvector extension
+#
+#  FCC server (fcc-server) runs on the HOST machine at port 8082.
+#  Inside containers, host machine is reached via host.docker.internal.
+#
+#  Usage:
+#    docker compose up --build          # first run
+#    docker compose up -d               # detached
+#    docker compose logs -f backend     # tail logs
+#    docker compose down -v             # stop + remove volumes
 
 services:
-  postgres:
-    image: postgres:15-alpine
-    container_name: ai-copilot-db
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ai_copilot
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+
+  # ── Frontend ─────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: akki-frontend
     ports:
-      - "5432:5432"
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - akki-net
+
+  # ── Backend ──────────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: akki-backend
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - brainmeaning:/data/brain_meaning
+    ports:
+      - "5000:5000"        # exposed for direct access / debugging
+    env_file:
+      - .env               # picks up JWT_SECRET, ELEVENLABS_API_KEY, etc.
+    environment:
+      # Database — internal Docker network
+      DATABASE_URL: postgresql://akki:${DB_PASSWORD:-changeme}@db:5432/akki_ai
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme}
+      BRAIN_MEANING_PATH: /data/brain_meaning
+
+      # FCC proxy — host machine port 8082
+      FREE_CLAUDE_CODE_URL:   http://host.docker.internal:8082
+      FREE_CLAUDE_CODE_TOKEN: ${FREE_CLAUDE_CODE_TOKEN:-freecc}
+      FREE_CLAUDE_CODE_MODEL: claude-3-freecc-no-thinking/nvidia_nim/nvidia/nemotron-3-super-120b-a12b
+
+      # Ollama on host — reachable via host.docker.internal inside the container
+      OLLAMA_HOST:        http://host.docker.internal:11434
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
+
+      # Disable the Vite dev proxy — Nginx serves the SPA in Docker
+      VITE_URL: ""
+
+    depends_on:
+      db:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    # Makes host.docker.internal resolve to the actual host on Linux
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - akki-net
+
+  # ── PostgreSQL + pgvector ─────────────────────────────────────────────────────
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: akki-db
+    environment:
+      POSTGRES_DB:       akki_ai
+      POSTGRES_USER:     akki
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    ports:
+      - "5434:5432"      # host:5434 — avoids clash with any local Postgres on 5432/5433
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U akki -d akki_ai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - akki-net
+
+  # ── Neo4j (Brain Engine knowledge graph) ──────────────────────────────────────
+  neo4j:
+    image: neo4j:5-community
+    container_name: akki-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme}
+    ports:
+      - "7474:7474"   # browser UI
+      - "7687:7687"   # bolt protocol
+    volumes:
+      - neo4jdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -O /dev/null -q http://localhost:7474 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
-
-  chroma:
-    image: chromadb/chroma:latest
-    container_name: ai-copilot-chroma
+      retries: 10
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    networks:
+      - akki-net
+
+  # ── Brain Crawler (always-on) ──────────────────────────────────────────────────
+  brain-crawler:
+    build:
+      context: .
+      dockerfile: Dockerfile.brain-crawler
+    container_name: akki-brain-crawler
+    volumes:
+      - brainmeaning:/data/brain_meaning
     environment:
-      - CHROMA_SERVER_HOST=0.0.0.0
-      - CHROMA_SERVER_HTTP_PORT=8000
-    volumes:
-      - chroma_data:/chroma/chroma
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  redis:
-    image: redis:7-alpine
-    container_name: ai-copilot-redis
+      DATABASE_URL: postgresql://akki:${DB_PASSWORD:-changeme}@db:5432/akki_ai
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme}
+      BRAIN_MEANING_PATH: /data/brain_meaning
+    depends_on:
+      db:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
     restart: unless-stopped
-    ports:
-      - "6379:6379"
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+    networks:
+      - akki-net
+
+networks:
+  akki-net:
+    driver: bridge
 
 volumes:
-  postgres_data:
-  chroma_data:
-  redis_data:
+  pgdata:
+  neo4jdata:
+  # The discovered word senses. Was an unmounted relative path inside
+  # each container, so the crawler wrote senses to its own filesystem and
+  # the backend read an empty one -- the meaning layer could never have
+  # worked across that boundary, and both copies died on every restart.
+  brainmeaning:

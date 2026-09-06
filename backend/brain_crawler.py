@@ -22,6 +22,7 @@ from backend.database import AsyncSessionLocal
 from backend.models import BrainFrontier, BrainVisitedPage, BrainDeadLetter, BrainStats
 from backend.services import brain_learn
 from backend.services import brain_curiosity
+from backend.services import brain_meaning
 from backend.services import brain_relations
 from backend.services.neo4j_service import get_driver, ensure_schema
 from backend.services.brain_fetchers import (
@@ -117,13 +118,22 @@ _MAX_READ = int(os.getenv("BRAIN_READ_MAX", "1200"))
 _YIELD_SHARE = float(os.getenv("BRAIN_READ_SHARE", "0.2"))
 
 
-def _read_adaptively(sentences: list[str], extract) -> tuple[list, int]:
+def _read_adaptively(sentences: list[str], extract) -> tuple[list, int, dict]:
     """Parse blocks of sentences while the page is still producing relations.
 
-    Returns the pairs found and how many sentences were actually read, so the
-    caller can record what the page cost as well as what it gave.
+    Returns the pairs found, how many sentences were actually read so the
+    caller can record what the page cost as well as what it gave, and the
+    SENTENCE each concept was found in.
+
+    That third value is what the meaning layer clusters into word senses, and
+    the crawler was not collecting it -- `record_contexts` was reachable only
+    from the learn-on-demand path, so sense discovery saw a handful of
+    `/ask` misses and none of the 40,000 pages the crawler had read. It is
+    gathered here rather than by re-walking the sentences afterwards, because
+    parsing is the bottleneck and the mapping is free at this point.
     """
     pairs: list = []
+    contexts: dict[str, list[str]] = {}
     best = 0.0
     read = 0
     for start in range(0, min(len(sentences), _MAX_READ), _BLOCK):
@@ -133,9 +143,13 @@ def _read_adaptively(sentences: list[str], extract) -> tuple[list, int]:
         found = []
         for sentence in block:
             try:
-                found.extend(extract(sentence))
+                extracted = extract(sentence)
             except Exception:
                 continue
+            found.extend(extracted)
+            for subject, _verb, obj in extracted:
+                contexts.setdefault(subject, []).append(sentence)
+                contexts.setdefault(obj, []).append(sentence)
         pairs.extend(found)
         read += len(block)
 
@@ -143,7 +157,20 @@ def _read_adaptively(sentences: list[str], extract) -> tuple[list, int]:
         best = max(best, yield_rate)
         if read >= _MIN_READ and yield_rate < best * _YIELD_SHARE:
             break
-    return pairs, read
+    return pairs, read, contexts
+
+
+def _record_page_contexts(contexts: dict) -> None:
+    """Hand each concept's sentences to the sense store.
+
+    Wrapped per concept for the same reason `brain_learn` wraps it: recording
+    meaning must never be able to break a page that was read successfully.
+    """
+    for concept, sentences in contexts.items():
+        try:
+            brain_meaning.record_contexts(concept, sentences)
+        except Exception as exc:
+            logger.debug("Could not record contexts for %r: %s", concept, exc)
 
 
 # What a page discovered while READING a curiosity entry was reached by. Not
@@ -205,7 +232,8 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
     # The verb is kept alongside the pair: the graph is unchanged, and the
     # observation log gains what the graph throws away. One parse either way --
     # parsing is the bottleneck, so nothing is read twice.
-    triples, sentences_read = _read_adaptively(sentences, extract_relations)
+    triples, sentences_read, contexts = _read_adaptively(sentences, extract_relations)
+    _record_page_contexts(contexts)
     pairs = [(subject, obj) for subject, _, obj in triples]
 
     word_freq: Counter = Counter()
@@ -262,25 +290,78 @@ async def _record_failure(pg_session, url: str, source_type: str, error: str) ->
     await pg_session.commit()
 
 
+# How long a thin edge, or a concept resting only on thin edges, is left alone
+# before the pruner may sweep it.
+#
+# The pruner used to delete every count-1 edge on sight, then delete whatever
+# concept that orphaned. A concept read on ONE page has most of its edges at
+# count 1, so a single read of something new mostly evaporated within ten
+# minutes. Measured on the live graph: one prune would have taken 7,751 edges
+# and 6,461 concepts -- 12% of the graph -- including 12 of the 27 edges
+# `quasicrystal` had just been read to obtain, having already lost that concept
+# the same way once before.
+#
+# That is the bottom of the bucket the curiosity loop pours into: curiosity
+# reads what the brain does not know, and what it does not know it has by
+# definition seen once.
+#
+# 24 hours is roughly 29,000 pages at the current rate -- a real chance to meet
+# a concept again -- but it is a reasoned default, NOT calibrated against how
+# long edges actually take to reach count 2. That measurement needs history the
+# old pruner was deleting. Flagged in the log alongside the curiosity
+# thresholds, which are uncalibrated for the same reason.
+PROBATION_HOURS = 24
+
+
+def thin_edge_prune_cypher() -> str:
+    """Sweep edges that stayed thin, once they have had a fair chance not to.
+
+    Still `count < 2`, so the dust the pruner exists to control is still
+    controlled -- its comment records 83% of the graph going edgeless without
+    it. The addition is that an edge written moments ago is not yet evidence of
+    anything, and deleting it measures nothing except how recently the crawler
+    ran.
+    """
+    return (
+        "MATCH (:Concept)-[r:CO_OCCURS]->() "
+        "WHERE r.count < 2 AND r.last_updated IS NOT NULL "
+        f"AND r.last_updated < datetime() - duration({{hours: {PROBATION_HOURS}}}) "
+        "DELETE r"
+    )
+
+
+def orphan_prune_cypher() -> str:
+    """Delete concepts left with no edges -- unless they are still new.
+
+    Orphan deletion is what actually loses the concept, so it needs the same
+    probation. Without it a concept survives edge-pruning only to be swept by
+    the very next statement, and the protection above buys nothing.
+    """
+    return (
+        "MATCH (c:Concept) WHERE NOT (c)-[:CO_OCCURS]-() "
+        "AND (c.first_seen IS NULL OR "
+        f"c.first_seen < datetime() - duration({{hours: {PROBATION_HOURS}}})) "
+        "DELETE c"
+    )
+
+
 async def _prune_low_value_edges(neo4j_driver) -> None:
-    async with neo4j_driver.session() as session:
-        await session.run(
-            "MATCH (:Concept)-[r:CO_OCCURS]->() WHERE r.count < 2 DELETE r"
-        )
-        await session.run(
-            "MATCH (a:Concept)-[r:CO_OCCURS]->() "
-            "WITH a, r ORDER BY r.count DESC "
-            "WITH a, collect(r) AS rels "
-            "UNWIND rels[50..] AS excess "
-            "DELETE excess"
-        )
-        # Delete concepts left with no edges after pruning. Previously these
-        # orphans accumulated (83% of the graph became edgeless dust); a concept
-        # with no connections is not knowledge, so remove it.
-        await session.run(
-            "MATCH (c:Concept) WHERE NOT (c)-[:CO_OCCURS]-() DELETE c"
-        )
-    logger.info("Pruning complete: dropped low-count/long-tail edges and orphaned concepts.")
+    """Never raises: losing a prune costs disk, losing the crawl costs reading."""
+    try:
+        async with neo4j_driver.session() as session:
+            await session.run(thin_edge_prune_cypher())
+            await session.run(
+                "MATCH (a:Concept)-[r:CO_OCCURS]->() "
+                "WITH a, r ORDER BY r.count DESC "
+                "WITH a, collect(r) AS rels "
+                "UNWIND rels[50..] AS excess "
+                "DELETE excess"
+            )
+            await session.run(orphan_prune_cypher())
+    except Exception as exc:
+        logger.warning("Pruning failed, crawl continues: %s", exc)
+        return
+    logger.info("Pruning complete: swept edges and concepts past probation.")
 
 
 # The one LIKE pattern behind both the prioritised frontier query and the
