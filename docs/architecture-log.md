@@ -4,6 +4,197 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-06 (session 23) -- Curiosity had never once run. Four defects, all production-only.
+
+**Status:** built, deployed, verified live. 283 tests pass. Commit 643c342.
+
+The curiosity loop was built in session 3, closed on itself in session 7, and
+has been wired into `/ask` ever since. Every one of its unit tests passed.
+
+    SELECT source_type, count(*) FROM brain_visited_pages GROUP BY 1;
+     wikipedia | 38834
+    (1 row)
+
+Zero `curiosity:*` rows. Not in the visited-page table, not in the frontier,
+not in the dead letters. After 38,834 crawled pages the brain had never read a
+single thing it was curious about, and `measure_effectiveness` had returned
+`{}` every time it was called.
+
+Four defects, in the order they surfaced. Each was hidden by the one before it,
+so none could have been found without fixing its predecessor first.
+
+### 1. The resolver returned None for every term
+
+`brain_fetchers.fetch_structure` reports `redirectedTo` from `resp.history`,
+which httpx populates **only if the client was constructed with
+`follow_redirects=True`**. `/api/brain/ask` constructed a plain client. So the
+search page came back as an empty redirect stub: no references, no redirect,
+and `resolve_source` returned None for every term it was ever asked about.
+
+Measured directly:
+
+    follow_redirects=False   inflation -> None
+    follow_redirects=True    inflation -> 'https://en.wikipedia.org/wiki/Inflation'
+
+Fixed in `brain_fetchers._get`: redirects are requested **per request**, so no
+caller has to know and no future caller can undo it. Fixing the one call site
+in `main.py` instead would have left the same trap set for the next caller.
+
+Why no test caught it: every existing test passes an `AsyncMock` client, and a
+mock has no redirect behaviour to get wrong. The new tests build a real
+`httpx.AsyncClient` over a `MockTransport`, so redirects are genuinely followed
+or genuinely not, and one of them asserts the property that was actually
+violated -- that the answer does not depend on how the caller built its client.
+
+### 2. A queued entry would have waited two weeks anyway
+
+`select(BrainFrontier).limit(BATCH_SIZE)`, no ORDER BY. Postgres returns heap
+order, so a new entry sits behind everything already discovered: 466,850 URLs
+against ~1,200 reads an hour, on a frontier growing faster than it drains.
+
+Curiosity is worthless on that schedule. Its entire claim is that the brain
+reads what an answer just revealed it does not know; a queue position two weeks
+out is indistinguishable from never.
+
+`brain_crawler.select_frontier_batch` now runs a narrow prioritised query
+first, then tops the batch up from the bulk frontier. Two queries, not one
+ORDER BY -- ordering the whole table would make every batch pay a full sort of
+half a million rows to move at most three.
+
+### 3. The prioritised query was a 1.4-second seq scan
+
+Measured, not assumed:
+
+    Parallel Seq Scan on brain_frontier  (actual time=1357..1357 rows=0)
+      Rows Removed by Filter: 155962
+    Execution Time: 1398.259 ms
+
+Once per twenty-page batch, growing with the frontier. A **partial** index on
+just the curiosity rows fixed it -- it indexes a handful of rows, so it stays
+kilobytes however large the frontier grows, and it does not slow the bulk link
+inserts, which do not match its predicate.
+
+    Index Scan using brain_frontier_curiosity_idx
+    Execution Time: 0.058 ms
+
+1398 ms -> 0.058 ms. Created idempotently in plain SQL at crawler startup, for
+the reason sessions 7 and 22 both recorded: `models.py` carries another agent's
+uncommitted work, and a declared index would mean committing it alongside.
+
+### 4. `ON CONFLICT DO NOTHING` discarded the whole point
+
+This one only became visible once 1-3 were fixed. Of three concepts a real
+answer was curious about, one was queued and two were silently dropped -- both
+were already in the frontier as ordinary `wikipedia` entries from the previous
+day, and the insert skipped them.
+
+That is the wrong reading of what curiosity does. It is not discovering
+addresses; the crawler finds those by the hundred thousand unaided. It is
+saying *read this one next*. On a URL already present, the priority marker is
+the entire payload. Now `on_conflict_do_update`, with a `where` clause that
+never demotes an entry curiosity already raised.
+
+### 5. Then it leaked exponentially, and production said so within minutes
+
+Not on the list above because it did not exist until fix 4 shipped. The crawler
+stamps every link it discovers with the source_type of the page it was found
+on. Harmless while every page was `wikipedia`. The moment one page carried
+`curiosity:derived`, reading it minted 96 more `curiosity:derived` entries --
+including a long tail of unrelated people named David Smith -- each of which
+would mint its own on being read. Within minutes it had reached 551 frontier
+rows and 44 visited pages.
+
+Two failures, either sufficient alone:
+
+- The priority lane grows without bound and swallows the crawl, which is
+  exactly the starvation `select_frontier_batch` claims cannot happen.
+- `measure_effectiveness` reads those back as outcomes of the `derived` bet.
+  The signal the entire loop turns on would have been measuring pages curiosity
+  never asked for. **A corrupted feedback signal is worse than none**, because
+  the loop acts on it.
+
+`discovered_source_type` strips the marker: it describes why a page was
+*queued*, not where it came from. Ordinary provenance still travels untouched.
+The leaked rows were demoted in place.
+
+### Verified live, not just green
+
+    url                                          source_type        sentences
+    https://en.wikipedia.org/wiki/Quasicrystal   curiosity:unknown  200
+    https://en.wikipedia.org/wiki/Penrose_tiling curiosity:thin     200
+
+Queued from a real gap, read within a minute, ahead of 466,850 backlogged URLs.
+`measure_effectiveness` returns real records for the first time instead of `{}`.
+Zero curiosity rows have been minted by propagation since the fix.
+
+### Rejected
+
+- **Fixing `main.py`'s client instead of `brain_fetchers`.** Same symptom gone,
+  same trap left armed for the next caller. The defect was that a discovery
+  function depended on a transport flag its callers could not be expected to
+  know about.
+- **One `ORDER BY` over the frontier.** A full sort of half a million rows
+  every twenty pages to reorder at most three.
+- **A `priority` column.** Schema change on `models.py`, which carries another
+  agent's uncommitted work. The source_type prefix already carried enough.
+- **Returning only curiosity entries when any exist.** Cuts a 20-page batch to
+  one page and re-queries twenty times as often -- trading one starvation
+  problem for another.
+
+### What this does and does not claim
+
+It does **not** claim the brain is better at answering today. It claims the
+curiosity loop now runs at all, which it never has. Whether the three bets --
+`unknown`, `derived`, `thin` -- actually differ in payoff is now a measurable
+question rather than an untested assumption, and answering it needs reads that
+only accumulate with time and traffic.
+
+The thresholds (`_USEFUL_SENTENCES = 3`, `_MIN_SAMPLES = 8`,
+`_MIN_SUCCESS_RATE = 0.25`) remain the reasoned guesses session 7 flagged. They
+have never been calibrated, and until this session there was no data with which
+to calibrate them.
+
+### A note on what "useful" measures
+
+`_USEFUL_SENTENCES >= 3` scores whether the *page had text*, not whether the
+*gap was filled*. A curiosity read that returns 300 sentences about something
+irrelevant scores as a success. `BrainVisitedPage.concept` carries what was
+asked for, so a truer measure -- did that concept gain edges in the graph after
+the read -- is available and not yet built. Left as the first open question
+rather than guessed at now.
+
+### Unrelated defect found and fixed the same session: every backend restart 502'd the site
+
+Deploying the above restarted the backend, and the site stopped loading --
+login included. nginx resolves a `proxy_pass` hostname **once at startup** and
+caches the address forever, so a restarted backend's new container IP left the
+frontend proxying to nowhere. The backend was perfectly healthy on its own port
+throughout, and nothing in either log said why.
+
+This was not caused by this session's work; any backend restart in the last 18
+hours would have done it, and the only cure was knowing to restart the frontend
+too. `nginx.conf` now holds the upstream in a variable with
+`resolver 127.0.0.11 valid=10s`, which forces per-request resolution. Verified
+by restarting the backend and watching `:80` return 200 the moment the backend
+came up, with no frontend restart.
+
+### Hardcoded assumptions (charter status)
+
+Unchanged by this session. `brain_query._WH_INTENT`, `brain_nlp`'s connective
+tables. Nothing new added; `_DISCOVERED` and the curiosity prefix are internal
+provenance labels, not assumptions about any document format.
+
+### Open questions
+
+1. Effectiveness measures sentence count, not whether the gap closed. See above.
+2. Curiosity is only ever triggered by `/ask`, so a brain nobody questions is
+   never curious. Whether the crawler should generate its own gaps from thin
+   regions of the graph is unexplored.
+3. The thresholds are still uncalibrated. Revisit once reads accumulate.
+4. `measure_effectiveness` runs on every ask (session 7's open question 1).
+   Still uncached, still one grouped aggregate; now backed by an index on the
+   frontier but not on `brain_visited_pages.source_type`.
+
 ## 2026-09-06 (session 22) -- The verb is kept. Commit 0c0c24c.
 
 **Status:** built, deployed, crawler recording. 269 tests pass.

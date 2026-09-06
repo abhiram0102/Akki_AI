@@ -63,6 +63,27 @@ class RateLimiter:
         self._last_request[domain] = time.monotonic()
 
 
+async def _get(url: str, client):
+    """One GET for every fetch in this module, with redirects always followed.
+
+    Redirect-following is requested PER REQUEST rather than left to however the
+    caller happened to build its client. That is not a style preference: a
+    client built without `follow_redirects` makes `resp.history` empty and the
+    body a near-empty redirect stub, so `_meaningful_redirect` reports nothing
+    and discovery finds no references. Both failures are silent -- the caller
+    gets a well-formed structure with zero links rather than an error.
+
+    That is exactly what happened. `/api/brain/ask` built a plain client, so
+    `brain_learn.resolve_source` returned None for every term and the curiosity
+    loop queued nothing for fifteen sessions while every one of its unit tests
+    passed. Tests could not see it because they pass mock clients, and a mock
+    has no redirect behaviour to get wrong.
+
+    Asking here means no caller has to know, and no future caller can undo it.
+    """
+    return await client.get(url, follow_redirects=True)
+
+
 async def fetch(url: str, client) -> tuple[str, list[str]]:
     """Fetch any document and return its prose and the references it offers.
 
@@ -72,7 +93,7 @@ async def fetch(url: str, client) -> tuple[str, list[str]]:
     themselves, so the same call handles an encyclopedia article, a paper
     abstract, or a format nobody has seen before.
     """
-    resp = await client.get(url)
+    resp = await _get(url, client)
     structure = brain_discovery.discover_structure(resp.text, url)
     return structure["text"], structure["links"]
 
@@ -121,7 +142,7 @@ async def fetch_structure(url: str, client, narrow_to_shape: bool = True) -> dic
     asked for. Compares the two addresses structurally; assumes nothing about
     what any particular site's redirect conventions look like.
     """
-    resp = await client.get(url)
+    resp = await _get(url, client)
     structure = brain_discovery.discover_structure(
         resp.text, url, narrow_to_shape=narrow_to_shape
     )

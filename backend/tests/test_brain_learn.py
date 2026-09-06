@@ -236,3 +236,80 @@ async def test_learn_concept_anchors_queried_term(monkeypatch):
 
     assert "blockchain" in captured["word_freq"]
     assert any(cause == "blockchain" for (cause, _effect) in captured["edge_counts"])
+
+
+# --- Regression: the curiosity loop was dead in production for 15 sessions ---
+#
+# `resolve_source` reads a search page and takes the address the search
+# redirected to. That redirect is read from `resp.history`, which httpx only
+# populates when the CLIENT was built with `follow_redirects=True`. Every
+# caller therefore had to know to set a flag, and `/api/brain/ask` did not.
+#
+# Result in production: `resolve_source` returned None for every term, so
+# `queue_reading` queued nothing and the brain never once read anything it was
+# curious about. Zero `curiosity:*` rows existed in the frontier or the
+# visited-page table after 38,834 crawled pages.
+#
+# No existing test could catch it: they all pass an `AsyncMock` client, and a
+# mock has no redirect behaviour to get wrong. These use a REAL httpx client
+# over a fake transport, so redirects are genuinely followed or genuinely not.
+
+def _redirecting_transport(search_path: str, article_url: str, article_body: str):
+    """A fake network where the search endpoint 302s to a single article."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if search_path in str(request.url):
+            return httpx.Response(302, headers={"location": article_url})
+        return httpx.Response(200, text=article_body)
+
+    return httpx.MockTransport(handler)
+
+
+_ARTICLE = (
+    "<html><body><p>Inflation is a rise in prices.</p>"
+    "<a href='/wiki/Money'>Money</a><a href='/wiki/Prices'>Prices</a>"
+    "</body></html>"
+)
+
+
+@pytest.mark.asyncio
+async def test_resolve_source_follows_a_search_redirect_on_a_plain_client():
+    """The production defect, stated as a test.
+
+    The client is built the way `/api/brain/ask` built it — no
+    `follow_redirects`. Resolution must still work, because a caller cannot be
+    expected to know that a discovery function depends on a transport flag.
+    """
+    import httpx
+
+    transport = _redirecting_transport(
+        "search=", "https://en.wikipedia.org/wiki/Inflation", _ARTICLE)
+    async with httpx.AsyncClient(transport=transport) as client:
+        url = await brain_learn.resolve_source("inflation", client)
+
+    assert url == "https://en.wikipedia.org/wiki/Inflation"
+
+
+@pytest.mark.asyncio
+async def test_resolve_source_result_does_not_depend_on_client_configuration():
+    """Same term, two differently-configured clients, one answer.
+
+    This is the property that was actually violated: the flag the caller
+    happened to set silently changed whether the brain could learn at all.
+    """
+    import httpx
+
+    def _client(follow):
+        return httpx.AsyncClient(
+            transport=_redirecting_transport(
+                "search=", "https://en.wikipedia.org/wiki/Inflation", _ARTICLE),
+            follow_redirects=follow,
+        )
+
+    async with _client(False) as plain:
+        without = await brain_learn.resolve_source("inflation", plain)
+    async with _client(True) as following:
+        with_flag = await brain_learn.resolve_source("inflation", following)
+
+    assert without == with_flag

@@ -216,13 +216,33 @@ async def queue_reading(picks: list[tuple[str, str]], client, resolver) -> int:
                 if await session.get(BrainDeadLetter, url) is not None:
                     continue
 
-                result = await session.execute(
-                    pg_insert(BrainFrontier)
+                statement = pg_insert(BrainFrontier).values(
+                    url=url, concept=concept,
                     # The reason travels with the entry so the completed read
                     # can be attributed back to the bet that caused it.
-                    .values(url=url, concept=concept,
-                            source_type=f"{SOURCE_TYPE}:{reason}")
-                    .on_conflict_do_nothing()
+                    source_type=f"{SOURCE_TYPE}:{reason}",
+                )
+                result = await session.execute(
+                    # PROMOTE on conflict, do not skip. Found live: of three
+                    # concepts one real answer was curious about, two were
+                    # already in the frontier as ordinary crawl entries queued
+                    # the day before, behind 466,850 others. `do_nothing` threw
+                    # both away and left them weeks from being read.
+                    #
+                    # Curiosity is not discovering addresses -- the crawler
+                    # finds those by the hundred thousand without help. It is
+                    # saying "read this one next". On a URL already present the
+                    # priority marker IS the entire payload, so writing it is
+                    # the whole operation rather than a fallback.
+                    statement.on_conflict_do_update(
+                        index_elements=[BrainFrontier.url],
+                        set_={"source_type": statement.excluded.source_type,
+                              "concept": statement.excluded.concept},
+                        # Never demote an entry curiosity already raised: an
+                        # answer that names a concept twice would otherwise
+                        # rewrite the first, stronger reason with a weaker one.
+                        where=BrainFrontier.source_type.notlike(f"{SOURCE_TYPE}:%"),
+                    )
                 )
                 queued += result.rowcount or 0
             await session.commit()

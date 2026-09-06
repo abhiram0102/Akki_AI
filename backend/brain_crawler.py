@@ -15,12 +15,13 @@ from urllib.parse import urlparse
 from datetime import datetime, timezone
 
 import httpx
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from backend.database import AsyncSessionLocal
 from backend.models import BrainFrontier, BrainVisitedPage, BrainDeadLetter, BrainStats
 from backend.services import brain_learn
+from backend.services import brain_curiosity
 from backend.services import brain_relations
 from backend.services.neo4j_service import get_driver, ensure_schema
 from backend.services.brain_fetchers import (
@@ -145,6 +146,29 @@ def _read_adaptively(sentences: list[str], extract) -> tuple[list, int]:
     return pairs, read
 
 
+# What a page discovered while READING a curiosity entry was reached by. Not
+# the curiosity marker: that says why the brain wanted the page it was just on,
+# and it does not transfer to everything that page happens to link to.
+_DISCOVERED = "discovered"
+
+
+def discovered_source_type(source_type: str) -> str:
+    """The source_type to stamp on links found while reading `source_type`.
+
+    Links inherit the page's source_type, which was harmless while every page
+    was `wikipedia`. Once a page carried `curiosity:derived`, reading it minted
+    96 more `curiosity:derived` frontier entries, each of which would mint its
+    own -- an exponential priority lane that would swallow the crawl, and a
+    feedback signal measuring pages curiosity never asked for.
+
+    The marker is stripped rather than the whole source_type replaced, so
+    ordinary provenance still travels to a page's links untouched.
+    """
+    if source_type.startswith(f"{brain_curiosity.SOURCE_TYPE}:"):
+        return _DISCOVERED
+    return source_type
+
+
 async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: RateLimiter,
                           neo4j_driver, pg_session) -> int | None:
     """Fetch, extract, and persist one frontier entry.
@@ -210,8 +234,9 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
     # every site. It now carries the referring page's concept instead, which
     # assumes nothing about how any site builds its addresses. What the page is
     # actually about is decided by reading it.
+    link_source_type = discovered_source_type(source_type)
     new_links = [
-        {"url": link, "concept": concept, "source_type": source_type}
+        {"url": link, "concept": concept, "source_type": link_source_type}
         for link in links
     ]
     if new_links:
@@ -258,6 +283,86 @@ async def _prune_low_value_edges(neo4j_driver) -> None:
     logger.info("Pruning complete: dropped low-count/long-tail edges and orphaned concepts.")
 
 
+# The one LIKE pattern behind both the prioritised frontier query and the
+# partial index that makes it cheap. A partial index is only usable when its
+# predicate implies the query's, so these two must never drift apart -- hence
+# one constant rather than the same string written twice.
+_CURIOSITY_PATTERN = f"{brain_curiosity.SOURCE_TYPE}:%"
+
+
+async def ensure_frontier_index(pg_session) -> None:
+    """Make the curiosity-first lookup cheap, or carry on without it.
+
+    Without an index the prioritised query is a parallel sequential scan:
+    measured at 1,398 ms over 466,850 frontier rows, discarding all of them,
+    once per twenty-page batch. The frontier grows faster than it drains, so
+    that cost grows with it.
+
+    A PARTIAL index solves it for almost nothing. It indexes only rows
+    curiosity queued -- a handful at a time, capped per answer -- so it stays
+    kilobytes no matter how large the frontier gets, and it does not slow down
+    the bulk inserts of discovered links, which do not match the predicate.
+
+    Created here in plain SQL rather than declared on the model. `models.py`
+    carries another agent's uncommitted work, so committing a declared index
+    would mean committing their unfinished changes alongside it. Session 7 and
+    session 22 both took this route for the same reason.
+
+    Never raises. An index is an optimisation; a database that refuses it
+    should cost the crawler speed, not its ability to read.
+    """
+    try:
+        await pg_session.execute(text(
+            "CREATE INDEX IF NOT EXISTS brain_frontier_curiosity_idx "
+            "ON brain_frontier (source_type) "
+            f"WHERE source_type LIKE '{_CURIOSITY_PATTERN}'"
+        ))
+        await pg_session.commit()
+    except Exception as exc:
+        logger.warning(
+            "Could not create the curiosity frontier index; the prioritised "
+            "query will sequential-scan: %s", exc)
+
+
+async def select_frontier_batch(pg_session, limit: int = BATCH_SIZE):
+    """The next entries to read, curiosity first.
+
+    The frontier used to be read with a bare `select(BrainFrontier).limit(n)`.
+    With no ORDER BY, Postgres returns heap order, which is effectively
+    insertion order -- so an entry queued now waits behind everything already
+    discovered. That is 466,850 URLs against a read rate near 1,200 an hour,
+    and the frontier grows faster than it drains. Anything the brain became
+    curious about today would be reached in about two weeks at best.
+
+    Curiosity is worth nothing on that schedule. Its whole claim is that the
+    brain goes and reads what an answer just revealed it does not know, so it
+    has to preempt the bulk crawl rather than join the back of it.
+
+    Two queries rather than one ORDER BY. The bulk query stays exactly as it
+    was -- unordered, so no sort over a half-million rows every twenty pages --
+    and the prioritised query is a narrow lookup over the handful of entries
+    curiosity has queued. Ordering the whole table instead would make every
+    batch pay a full sort to move at most three rows.
+
+    Curiosity cannot starve the ordinary crawl: `brain_curiosity` caps what any
+    one answer may queue, so the prioritised query empties and the fallback
+    runs. The fallback is skipped only when curiosity genuinely filled a batch.
+    """
+    result = await pg_session.execute(
+        select(BrainFrontier)
+        .where(BrainFrontier.source_type.like(_CURIOSITY_PATTERN))
+        .limit(limit)
+    )
+    batch = list(result.scalars().all())
+    if len(batch) >= limit:
+        return batch
+
+    result = await pg_session.execute(
+        select(BrainFrontier).limit(limit - len(batch))
+    )
+    return batch + list(result.scalars().all())
+
+
 async def main() -> None:
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -278,6 +383,8 @@ async def main() -> None:
     _headers = brain_learn.UA_HEADERS
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=_headers) as client:
         async with AsyncSessionLocal() as pg_session:
+            await ensure_frontier_index(pg_session)
+
             # Seed the frontier if empty
             result = await pg_session.execute(select(BrainFrontier).limit(1))
             if result.scalar_one_or_none() is None:
@@ -295,8 +402,7 @@ async def main() -> None:
             logger.info("Brain crawler starting.")
 
             while _running:
-                result = await pg_session.execute(select(BrainFrontier).limit(BATCH_SIZE))
-                batch = result.scalars().all()
+                batch = await select_frontier_batch(pg_session, BATCH_SIZE)
 
                 if not batch:
                     logger.info("Frontier empty — sleeping 30s before re-checking.")

@@ -212,3 +212,176 @@ def test_an_unproductive_page_now_stops_before_the_old_cap():
         f"read {read} sentences of a page that stopped producing after 50; "
         "the old fixed cap would have read 200"
     )
+
+
+# --- Curiosity entries must preempt the bulk frontier -----------------------
+#
+# The frontier query was `select(BrainFrontier).limit(BATCH_SIZE)` with no
+# ORDER BY, so Postgres returned rows in whatever order it liked -- in practice
+# heap order, which is insertion order. With 466,850 discovered URLs already
+# queued and the crawler reading ~1,200 an hour, anything queued today would
+# not be reached for roughly two weeks, and the frontier grows faster than it
+# drains, so "roughly two weeks" is optimistic.
+#
+# That makes curiosity pointless by construction. The entire claim of the
+# curiosity loop is that the brain reads what it just discovered it does not
+# know; a queue position two weeks out is indistinguishable from never.
+
+class _StubResult:
+    def __init__(self, rows): self._rows = rows
+    def scalars(self): return self
+    def all(self): return self._rows
+    def scalar_one_or_none(self): return self._rows[0] if self._rows else None
+
+
+class _RecordingSession:
+    """Stands in for the database, and records the statements it was asked to
+    run so a test can assert WHAT was asked for, not merely that something was."""
+    def __init__(self, *results):
+        self._results = list(results)
+        self.statements = []
+
+    async def execute(self, statement, *a, **kw):
+        self.statements.append(str(statement.compile(
+            compile_kwargs={"literal_binds": True})))
+        return self._results.pop(0) if self._results else _StubResult([])
+
+
+def _entry(url, source_type):
+    from backend.models import BrainFrontier
+    return BrainFrontier(url=url, concept="c", source_type=source_type)
+
+
+class TestFrontierPriority:
+    async def test_curiosity_entries_are_returned_before_bulk_entries(self):
+        """A curiosity entry queued last is still read first.
+
+        The batch is still filled to `limit` from the bulk frontier afterwards.
+        Returning the one curious entry alone would cut a 20-page batch to a
+        single page and re-query the frontier twenty times as often, which
+        trades one starvation problem for another.
+        """
+        curious = _entry("https://x/curious", "curiosity:unknown")
+        bulk = _entry("https://x/bulk", "wikipedia")
+        session = _RecordingSession(_StubResult([curious]), _StubResult([bulk]))
+
+        batch = await brain_crawler.select_frontier_batch(session, limit=20)
+
+        assert [e.url for e in batch] == ["https://x/curious", "https://x/bulk"]
+
+    async def test_bulk_frontier_is_read_when_nothing_is_curious(self):
+        """Priority must not starve the ordinary crawl."""
+        bulk = _entry("https://x/bulk", "wikipedia")
+        session = _RecordingSession(_StubResult([]), _StubResult([bulk]))
+
+        batch = await brain_crawler.select_frontier_batch(session, limit=20)
+
+        assert [e.url for e in batch] == ["https://x/bulk"]
+
+    async def test_the_prioritised_query_actually_asks_for_curiosity_entries(self):
+        """Pins WHICH kind of entry is prioritised.
+
+        Without this the two tests above pass for an implementation that runs
+        two arbitrary queries in a fixed order, which would prioritise nothing.
+        """
+        from backend.services import brain_curiosity
+        session = _RecordingSession(_StubResult([]), _StubResult([]))
+
+        await brain_crawler.select_frontier_batch(session, limit=20)
+
+        assert brain_curiosity.SOURCE_TYPE in session.statements[0]
+        assert brain_curiosity.SOURCE_TYPE not in session.statements[1]
+
+    async def test_no_second_query_is_run_when_curiosity_filled_the_batch(self):
+        """A full batch of curiosity reading should not also scan the frontier."""
+        curious = [_entry(f"https://x/{i}", "curiosity:derived") for i in range(20)]
+        session = _RecordingSession(_StubResult(curious))
+
+        batch = await brain_crawler.select_frontier_batch(session, limit=20)
+
+        assert len(batch) == 20
+        assert len(session.statements) == 1
+
+
+class TestFrontierIndex:
+    """The prioritised query is a seq scan without help.
+
+    Measured on the live frontier at 466,850 rows: 1,398 ms per batch, a
+    parallel sequential scan discarding every row. A batch is twenty pages and
+    a page is rate-limited to a second, so that is ~7% of crawl time now and
+    grows linearly with a frontier that is growing. A partial index covers only
+    curiosity rows, so it stays kilobytes however large the frontier gets.
+    """
+
+    async def test_the_index_predicate_matches_the_query_predicate(self):
+        """A partial index is only usable if its predicate implies the
+        query's. Same LIKE pattern on both sides, from one constant."""
+        from backend.services import brain_curiosity
+        session = _RecordingSession()
+
+        await brain_crawler.ensure_frontier_index(session)
+        ddl = session.statements[0]
+
+        await brain_crawler.select_frontier_batch(session, limit=20)
+        query = session.statements[1]
+
+        pattern = f"{brain_curiosity.SOURCE_TYPE}:%"
+        assert pattern in ddl and pattern in query
+
+    async def test_creating_the_index_is_idempotent(self):
+        """The crawler restarts often; startup must not fail on a second run."""
+        session = _RecordingSession()
+        await brain_crawler.ensure_frontier_index(session)
+        assert "IF NOT EXISTS" in session.statements[0].upper()
+
+    async def test_a_database_that_refuses_the_index_does_not_stop_the_crawl(self):
+        """An index is an optimisation. Losing it should cost speed, not the
+        brain's ability to read."""
+        class _Refuses:
+            async def execute(self, *a, **kw): raise RuntimeError("no permission")
+            async def commit(self): pass
+
+        await brain_crawler.ensure_frontier_index(_Refuses())  # must not raise
+
+
+class TestCuriosityDoesNotPropagate:
+    """A curiosity marker describes why a page was QUEUED, not where it came from.
+
+    Found in production within minutes of the priority fix going live. The
+    crawler stamps every link it discovers with the source_type of the page it
+    was discovered on. That was harmless while every page was `wikipedia`.
+    Once one page carried `curiosity:derived`, reading it minted 96 more
+    `curiosity:derived` frontier entries -- including a long tail of people
+    called David Smith -- each of which would mint its own on being read.
+
+    Two failures, either of which alone would be enough:
+
+    - The curiosity lane grows exponentially and swallows the crawl, which is
+      precisely the starvation `select_frontier_batch` claims cannot happen.
+    - `measure_effectiveness` reads these back as outcomes of the `derived`
+      bet. The feedback signal the whole loop turns on would be measuring
+      pages curiosity never asked for.
+    """
+
+    def test_a_curiosity_read_does_not_mint_curiosity_entries(self):
+        from backend.services import brain_curiosity
+        inherited = brain_crawler.discovered_source_type("curiosity:derived")
+        assert not inherited.startswith(brain_curiosity.SOURCE_TYPE)
+
+    def test_an_ordinary_source_type_is_still_carried_to_its_links(self):
+        """Only the priority marker is stripped. Provenance is untouched."""
+        assert brain_crawler.discovered_source_type("wikipedia") == "wikipedia"
+
+    def test_every_curiosity_reason_is_stripped_not_just_one(self):
+        from backend.services import brain_curiosity
+        for reason in (brain_curiosity.REASON_UNKNOWN,
+                       brain_curiosity.REASON_DERIVED,
+                       brain_curiosity.REASON_THIN):
+            out = brain_crawler.discovered_source_type(
+                f"{brain_curiosity.SOURCE_TYPE}:{reason}")
+            assert not out.startswith(brain_curiosity.SOURCE_TYPE), reason
+
+    def test_the_stripped_marker_is_not_empty(self):
+        """A blank source_type would violate the column's NOT NULL intent and
+        make the row unattributable."""
+        assert brain_crawler.discovered_source_type("curiosity:unknown")

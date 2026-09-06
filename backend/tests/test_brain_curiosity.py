@@ -11,6 +11,8 @@ that was already sent.
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from sqlalchemy.dialects import postgresql
+
 from backend.services import brain_curiosity
 
 
@@ -203,3 +205,49 @@ async def test_the_reason_travels_with_the_queued_entry():
     assert queued == 1
     assert captured["params"]["source_type"] == "curiosity:derived"
     assert captured["params"]["concept"] == "inflation"
+
+
+@pytest.mark.asyncio
+async def test_an_already_queued_url_is_promoted_rather_than_ignored():
+    """Curiosity's commonest case is a URL the crawler already discovered.
+
+    Found live. Of three concepts a real answer was curious about, two were
+    already sitting in the frontier as ordinary `wikipedia` entries queued the
+    previous day, behind 466,850 others. The insert used
+    `on_conflict_do_nothing`, so both were silently dropped and kept their
+    original position -- weeks away -- while `queue_reading` reported having
+    queued one.
+
+    That is the wrong reading of what curiosity does. It is not adding an
+    address the brain has never seen; the crawler finds those by the hundred
+    thousand on its own. It is saying *read this one next*. On a URL already
+    present, the only thing worth writing is the new priority.
+    """
+    statements = []
+
+    class _Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *exc): return False
+        async def get(self, model, url): return None
+        async def execute(self, statement):
+            statements.append(str(statement.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True})))
+            return MagicMock(rowcount=1)
+        async def commit(self): return None
+
+    async def resolver(concept, client):
+        return "https://en.wikipedia.org/wiki/Quasicrystal"
+
+    with patch.object(brain_curiosity, "AsyncSessionLocal", lambda: _Session()):
+        queued = await brain_curiosity.queue_reading(
+            [("quasicrystal", brain_curiosity.REASON_UNKNOWN)],
+            client=None, resolver=resolver,
+        )
+
+    assert queued == 1
+    sql = statements[0].upper()
+    assert "ON CONFLICT" in sql and "DO UPDATE" in sql, \
+        "an existing frontier row must be promoted, not skipped"
+    assert "SOURCE_TYPE" in sql.split("DO UPDATE", 1)[1], \
+        "the promotion must be of the priority marker itself"
