@@ -331,3 +331,87 @@ async def test_the_answer_says_which_meaning_it_settled_on():
         vocabulary={"passion"},
     )
     assert "passion" in out["observation"]
+
+
+# --- Provenance wired into the answer: "why do you believe this?" ------------
+#
+# The answer path returned a flat `sources` list -- a bag of URLs with no link
+# to WHICH belief each backed. attach_provenance replaces that with a real
+# trace for the headline beliefs the answer actually states, so a reader can
+# ask why AKKI holds each one. It is the first genuine "why do you believe
+# this?" interface. Bounded to the top beliefs so it adds no real latency, and
+# never internet -- trace() reads only the graph and the evidence store.
+
+class _PG:
+    def __init__(self, rows=None):
+        self.rows = rows or []
+    async def execute(self, statement, params=None):
+        from unittest.mock import MagicMock
+        r = MagicMock(); r.fetchall.return_value = self.rows; return r
+    async def commit(self): return None
+
+
+def _graph_with_edge():
+    from unittest.mock import MagicMock
+    s = MagicMock()
+    async def run(q, **k):
+        r = MagicMock()
+        async def single(): return {"strength": 3, "g2": 5.0}
+        r.single = single; return r
+    s.run = run; return s
+
+
+@pytest.mark.asyncio
+async def test_attach_provenance_traces_the_beliefs_the_answer_states():
+    answer = {
+        "topics": ["fire"],
+        "dependsOn": [{"word": "oxygen", "count": 4}],
+        "produces": [{"word": "heat", "count": 6}],
+        "derived": [{"concept": "energy", "via": "heat"}],
+    }
+    evidence = [("fire", "need", "oxygen", "https://x/Fire",
+                 "Fire needs oxygen.", "dep-parse", "2026-09-06T00:00:00Z")]
+
+    enriched = await brain_answer.attach_provenance(
+        answer, _PG(rows=evidence), _graph_with_edge())
+
+    prov = enriched["provenance"]
+    assert isinstance(prov, dict)
+    # every stated belief gets a trace with a basis
+    pairs = {(b["subject"], b["object"]) for b in prov["beliefs"]}
+    assert ("fire", "oxygen") in pairs
+    assert ("fire", "heat") in pairs
+    assert all("basis" in b["trace"]["why"] for b in prov["beliefs"])
+
+
+@pytest.mark.asyncio
+async def test_attach_provenance_is_bounded_not_one_trace_per_edge():
+    """A hundred associations must not mean a hundred graph round-trips on
+    every answer."""
+    answer = {
+        "topics": ["x"],
+        "dependsOn": [{"word": f"d{i}", "count": 1} for i in range(50)],
+        "produces": [{"word": f"p{i}", "count": 1} for i in range(50)],
+        "derived": [],
+    }
+    enriched = await brain_answer.attach_provenance(
+        answer, _PG(), _graph_with_edge())
+
+    assert len(enriched["provenance"]["beliefs"]) <= brain_answer._PROVENANCE_MAX
+
+
+@pytest.mark.asyncio
+async def test_attach_provenance_never_breaks_the_answer():
+    """A failure to explain a belief must not sink the answer that was already
+    composed."""
+    class _Broken:
+        async def execute(self, *a, **k): raise RuntimeError("db down")
+        async def commit(self): pass
+    answer = {"topics": ["fire"], "produces": [{"word": "heat", "count": 2}],
+              "dependsOn": [], "derived": []}
+
+    enriched = await brain_answer.attach_provenance(
+        answer, _Broken(), _graph_with_edge())
+
+    assert "summary" not in enriched or enriched is answer  # answer survives
+    assert "provenance" in enriched

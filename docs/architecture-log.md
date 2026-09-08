@@ -4,6 +4,63 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-08 (session 27) -- Provenance wired into /ask. "Why do you believe this?" is now user-facing. Provenance v1 complete.
+
+**Status:** attach_provenance built and wired into the /ask stream (tests pass;
+suite green). Human declared provenance v1 complete after this; next milestone
+is belief revision, deferred until the corpus has accumulated real evidence.
+
+Sanju's directive: wire trace() into /ask (the flat sources list was the last
+place the old shape survived), then stop -- provenance's job is one invariant,
+"no new knowledge enters AKKI without an auditable origin", not an ever-growing
+subsystem.
+
+### Built
+
+- **`brain_answer.attach_provenance(answer, pg, neo4j)`** -- upgrades the
+  answer's flat `provenance` source list into a per-belief trace. For each
+  headline belief the answer states (dependsOn, produces, derived), it calls
+  `brain_provenance.trace` and attaches source/span/method/derivation. Bounded
+  to `_PROVENANCE_MAX = 6` beliefs so a topic with a hundred associations does
+  not cost a hundred graph round-trips per answer. The old flat list is kept
+  under `provenance.sources` so nothing that consumed it breaks.
+- **Wired into the /ask generator** AFTER `build()` returns, inside its own
+  pg + neo4j sessions (`async with ... get_driver().session()`). Reads only the
+  graph and evidence store -- no internet, honouring zero-internet-at-answer-
+  time. Wrapped so it can never delay or break an answer already composed.
+
+Placed in `/ask` not `build()` because tracing needs graph sessions the
+composer deliberately does not hold, and because provenance EXPLAINS the answer,
+it does not shape it -- it runs after composition, never before.
+
+### Why this is the right stopping point for provenance
+
+Sanju's strategic call, recorded so a later session does not over-build it:
+provenance v1 is complete. Its job is the single invariant above, now enforced
+end to end -- crawl -> extract -> claim -> evidence captured (S26) -> traceable
+in the answer (S27). Turning it into a larger subsystem is explicitly NOT the
+next move.
+
+### The trajectory from here (Sanju)
+
+acquisition -> extraction -> provenance [DONE] -> corpus growth -> induced
+relations -> reasoning -> belief revision -> curiosity-driven acquisition ->
+prediction -> planning.
+
+The next MAJOR milestone is **belief revision** (real self-correction), but only
+after the evidence substrate has accumulated enough real observations to make
+revision meaningful. Not started, correctly -- revising beliefs on a near-empty
+evidence table would be revising nothing.
+
+### Open questions / next
+- The evidence table (S26) fills FORWARD only; it needs crawl time before
+  belief revision has material to work on.
+- Frontend does not yet render the structured `provenance.beliefs` (it showed,
+  at most, the flat source list). Owned by whoever holds the brain UI.
+- Belief revision: the next milestone, deliberately deferred.
+
+--- SESSION 26 (provenance substrate) BELOW ---
+
 ## 2026-09-08 (session 26) -- A world-model roadmap arrives. The fork, the ruling, and the provenance substrate.
 
 **Status:** provenance substrate built, tested, crawler wired (328 tests).

@@ -23,7 +23,17 @@ nothing in this module would need to change.
 """
 from starlette.concurrency import run_in_threadpool
 
-from backend.services import brain_meaning, brain_query, brain_service
+import logging
+
+from backend.services import brain_meaning, brain_query, brain_provenance, brain_service
+
+logger = logging.getLogger("akki.brain_answer")
+
+# How many of the answer's headline beliefs get a full provenance trace. Bounded
+# so a topic with a hundred associations does not mean a hundred graph
+# round-trips on every answer; the trace is for the claims the answer actually
+# leads with, not an audit of the whole neighbourhood.
+_PROVENANCE_MAX = 6
 
 # Evidence thresholds for describing how sure the brain is. Deterministic, so
 # the same graph state always produces the same wording.
@@ -332,5 +342,59 @@ async def build(plan, min_count: int = brain_service.MIN_EDGE_COUNT,
         # reader can tell a sense-specific answer from one that merely knows
         # which sense was meant.
         "senseFiltered": sense_filtered,
+        # Backward-compatible flat list. attach_provenance (called by /ask once
+        # it has graph sessions) upgrades this into a structured, per-belief
+        # "why do you believe this" trace.
         "provenance": sources or [],
     }
+
+
+async def attach_provenance(answer: dict, pg_session, neo4j_session) -> dict:
+    """Attach a real provenance trace to the beliefs the answer states.
+
+    This is AKKI's first genuine "why do you believe this?" interface. The
+    answer path used to return a flat list of source URLs with no link to WHICH
+    belief each backed. Here every headline belief the answer asserts --
+    dependsOn, produces, and the brain's own derived links -- is traced through
+    `brain_provenance.trace`, so a reader can ask why AKKI holds each one and
+    get source, span, method and derivation rather than a bag of URLs.
+
+    Called by `/ask` rather than `build`, because tracing needs graph sessions
+    the composer deliberately does not hold, and because it must run AFTER the
+    answer is composed -- it explains the answer, it does not shape it. Reads
+    only the graph and evidence store, never the internet.
+
+    Bounded to `_PROVENANCE_MAX` beliefs. Never raises: a belief that cannot be
+    explained must not sink an answer that was already composed.
+    """
+    primary = (answer.get("topics") or [None])[0]
+    if not primary:
+        answer["provenance"] = {"beliefs": [], "sources": answer.get("provenance") or []}
+        return answer
+
+    # The claims the answer actually made, strongest first, deduped by object.
+    pairs: list[str] = []
+    seen: set[str] = set()
+    for section, key in (("dependsOn", "word"), ("produces", "word"),
+                         ("derived", "concept")):
+        for item in (answer.get(section) or []):
+            obj = item.get(key)
+            if obj and obj not in seen:
+                seen.add(obj)
+                pairs.append(obj)
+
+    beliefs: list[dict] = []
+    for obj in pairs[:_PROVENANCE_MAX]:
+        try:
+            tr = await brain_provenance.trace(pg_session, neo4j_session, primary, obj)
+        except Exception as exc:
+            logger.debug("Could not trace %r/%r: %s", primary, obj, exc)
+            continue
+        beliefs.append({"subject": primary, "object": obj, "trace": tr})
+
+    answer["provenance"] = {
+        "beliefs": beliefs,
+        # The old flat list is kept alongside, so nothing that consumed it breaks.
+        "sources": answer.get("provenance") if isinstance(answer.get("provenance"), list) else [],
+    }
+    return answer

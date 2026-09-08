@@ -4011,6 +4011,19 @@ async def brain_ask(
         answer = await brain_answer.build(
             plan, min_count=min_count, sources=sources, produces=assoc, derived=inferred,
         )
+
+        # "Why do you believe this?" — upgrade the flat source list into a
+        # per-belief provenance trace for the claims the answer states. Reads
+        # only the graph and the evidence store (no internet), and never raises,
+        # so it cannot delay or break an answer already composed.
+        try:
+            async with AsyncSessionLocal() as prov_session, \
+                    get_driver().session() as prov_graph:
+                answer = await brain_answer.attach_provenance(
+                    answer, prov_session, prov_graph)
+        except Exception:
+            pass
+
         yield {"data": json.dumps({
             # `associations` and `inferred` are unchanged and stay first —
             # the 3D scene reads them and must keep working untouched.
