@@ -4,6 +4,90 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
+## 2026-09-08 (session 26) -- A world-model roadmap arrives. The fork it forces, and the first brick.
+
+**Status:** provenance layer built and tested (319 tests). Roadmap assessed;
+one architectural fork raised for the human, not decided here.
+
+### The directive
+
+Sanju set a seven-layer roadmap: (1) a typed WORLD MODEL -- entities, states,
+events, typed relations IS_A/PART_OF/CAUSES/REQUIRES/PRODUCES, time, evidence,
+contradictions; (2) real reasoning (deduction/induction/abduction/causal/
+counterfactual/temporal) that does not treat associative 2-hop paths as proof;
+(3) prediction + simulation with a predict->observe->update cycle; (4) curiosity
+driven by conflict and uncertainty, not just answer-gaps; (5) self-correction
+with an auditable "why do you believe this" chain; (6) planning/agency; (7)
+verified v1->v2 self-improvement. Priority order as listed.
+
+Most of the foundation already exists (crawler, NLP, brain_relations verbs,
+convergence, G2, brain_hypothesis verdicts, curiosity loop). The roadmap is
+largely about elevating and connecting those, not greenfield.
+
+### The fork raised (layer 1), left for the human
+
+**Typed relations collide with the project's defining constraint.** The charter
+forbids a hardcoded schema; a fixed IS_A/PART_OF/CAUSES ontology IS a hardcoded
+schema. And the memory records this measured and rejected FIVE times for one
+reason -- ~1 edge per concept, too sparse to induce types (S22: "stop inventing
+formulas, fix the food supply").
+
+Two roads, presented as the human's call:
+  (A) INDUCE the types from the verbs already logged in brain_relations --
+      charter-clean, but data-gated (weeks of crawl).
+  (B) HARDCODE the ontology -- fast, but knowingly breaks the core constraint.
+
+Recommended A, with the caveat that building it today repeats the five-times-
+rejected mistake. So this session built the layer that is ready NOW, charter-
+clean, and underpins layers 1/2/5 instead.
+
+### Built: brain_provenance.py -- "why does AKKI believe this?"
+
+Layer 5's headline requirement, and the connective tissue reasoning and belief-
+revision both need: you cannot revise or trust a belief you cannot trace.
+
+`explain(pg, neo4j, subject, obj)` assembles an evidence chain from three
+existing stores, WRITING NOTHING:
+  * brain_relations -- the verbs actually observed (`fire produce heat`, 4x):
+    direct testimony.
+  * the Neo4j edge -- strength (co-occurrence count) and g2 (surprise).
+  * brain_hypotheses -- whether the link was the brain's own 2-hop inference and
+    how it fared.
+
+Returns `basis` (observed / inferred / none), the raw observations, the edge,
+any inference, and a plain `why` that DOES NOT OVERCLAIM: a link the reading
+never bore out is narrated as inferred-and-unsupported, never as fact (test-
+enforced, same discipline as S25's no-"refuted"-verdict rule). An inference is
+only reported when there is no direct testimony -- a link both read and inferred
+is grounded by the reading.
+
+No hardcoded relation ontology: the verbs surfaced are whatever was observed,
+with no table saying what any means. Read-only throughout -- a trace that mutated
+state would corrupt the belief it explains (test-enforced).
+
+Not yet wired into an endpoint or the answer path; it is a library the reasoning
+and self-correction layers will call. Deliberately small given the circuit
+breaker that fired this run.
+
+### Rejected
+
+- **Starting with the typed world model (layer 1 as literally ordered).** It is
+  the one layer blocked by both the charter and measured data scarcity. Doing it
+  first would be the sixth instance of the mistake the memory names five times.
+- **Building all seven layers this session.** The circuit breaker had just fired
+  (63M tokens vs a 2M cap). One foundational, ready-now brick instead.
+
+### Open questions / next
+
+1. THE FORK above needs a human decision before layer 1 proceeds: induce (wait
+   for data) vs hardcode (break the charter).
+2. Provenance is a library; nothing calls it yet. Natural first consumer: the
+   /ask answer path, replacing the flat `provenance` sources list with a real
+   per-belief trace.
+3. Layers 2-7 remain unbuilt. The cheapest real next step under the charter is
+   probably layer 4's upgrade -- point curiosity at CONFLICTS (contradictory
+   observations in brain_relations) and weak-evidence beliefs, which needs no
+   new schema and no new data.
 ## 2026-09-06 (session 25) -- The brain now finds out whether it was wrong. First answer: 0 for 4.
 
 **Status:** built, deployed, verified live with a control. 312 tests pass.
