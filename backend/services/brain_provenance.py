@@ -144,3 +144,213 @@ def _why(subject, obj, basis, observations, edge, inference) -> str:
             line += " Later reading bore it out."
         return line
     return f"I have nothing on record connecting {subject} and {obj}."
+
+
+# ---------------------------------------------------------------------------
+# The substrate: capture what the pipeline was throwing away
+# ---------------------------------------------------------------------------
+#
+# explain() above reads what already existed. But brain_relations kept the verb
+# and a count and lost WHERE it was read, the exact SPAN, and HOW it was
+# extracted. Without those a belief can never answer where/how/when, so the
+# self-correction and reasoning layers built on top would have nothing to trace
+# to. This table keeps them, one row per observation.
+#
+# Predicate-agnostic on purpose: `predicate` is whatever verb the extractor
+# found, stored verbatim, with no mapping to CAUSES/IS_A/REQUIRES. Those types
+# are what the corpus is meant to INDUCE later; imposing them here would be the
+# hardcoded schema the charter forbids, and the substrate would then have to
+# change the day induction succeeds. It does not: a claim is (subject,
+# predicate, object) and stays that shape whatever the predicates turn out to
+# mean.
+#
+# Plain SQL beside the graph, not a declared model -- models.py carries another
+# agent's uncommitted work (sessions 7, 22, 24, 25 all took this route).
+
+_EVIDENCE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS brain_claim_evidence (
+    subject     TEXT NOT NULL,
+    predicate   TEXT NOT NULL,
+    object      TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    span        TEXT,
+    method      TEXT,
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (subject, predicate, object, source)
+)
+"""
+
+_EVIDENCE_INDEXES = (
+    # The trace queries every observation of a pair regardless of direction.
+    "CREATE INDEX IF NOT EXISTS brain_claim_evidence_pair "
+    "ON brain_claim_evidence (subject, object)",
+)
+
+_EVIDENCE_UPSERT = """
+INSERT INTO brain_claim_evidence (subject, predicate, object, source, span, method)
+VALUES (:subject, :predicate, :object, :source, :span, :method)
+ON CONFLICT (subject, predicate, object, source) DO UPDATE
+SET span = EXCLUDED.span, method = EXCLUDED.method, observed_at = now()
+"""
+
+_EVIDENCE_FOR_PAIR = """
+SELECT subject, predicate, object, source, span, method, observed_at::text
+FROM brain_claim_evidence
+WHERE (subject = :a AND object = :b) OR (subject = :b AND object = :a)
+ORDER BY observed_at
+"""
+
+# Conclusions reasoned THROUGH this concept: a derived claim records its
+# intermediate hop in `via`, so anything inferred via X depends on X.
+_DEPENDENTS = """
+SELECT subject, object FROM brain_hypotheses WHERE via = :concept
+"""
+
+
+async def ensure_evidence_schema(session) -> None:
+    """Create the evidence table if absent. Safe on every crawler start."""
+    await session.execute(text(_EVIDENCE_SCHEMA))
+    for statement in _EVIDENCE_INDEXES:
+        await session.execute(text(statement))
+    await session.commit()
+
+
+async def record_evidence(session, evidences) -> int:
+    """Store observations with their provenance: source, span, method.
+
+    An observation with no `source` is dropped -- evidence without provenance
+    is not evidence, and keeping it would defeat the substrate. `span` and
+    `method` may be absent (a source alone is still traceable), but the source
+    is the floor.
+
+    Never raises: this rides the hot crawl path, and losing a provenance row is
+    never worth losing a page that was read.
+    """
+    written = 0
+    try:
+        for e in evidences:
+            subject = (e.get("subject") or "").strip()
+            predicate = (e.get("predicate") or "").strip()
+            obj = (e.get("object") or "").strip()
+            source = (e.get("source") or "").strip()
+            if not (subject and predicate and obj and source):
+                continue
+            await session.execute(text(_EVIDENCE_UPSERT), {
+                "subject": subject, "predicate": predicate, "object": obj,
+                "source": source, "span": e.get("span"), "method": e.get("method"),
+            })
+            written += 1
+        await session.commit()
+    except Exception as exc:
+        logger.warning("Could not record claim evidence: %s", exc)
+        return 0
+    return written
+
+
+async def trace(pg_session, neo4j_session, subject: str, obj: str) -> dict:
+    """The full provenance of a belief, answering nine questions and collapsing
+    none of them into a single confidence number.
+
+      what          -- the claim: subject / (predicates observed) / object
+      why           -- basis: observed / inferred / none
+      where         -- the sources it was read from
+      how           -- the extraction methods that produced it
+      when          -- first and last time it was observed
+      supporting    -- every observation, with source and span
+      contradicting -- DEFERRED (see below), competing predicates surfaced raw
+      derivation    -- premises + method, when the belief is an inference
+      dependents    -- conclusions reasoned through this belief
+
+    On `contradicting`: two observations contradict only if their predicates are
+    opposites, and detecting opposition needs predicate polarity the project
+    cannot yet induce (distributional vectors place antonyms together -- a
+    measured failure, see the architecture log). So competing predicates are
+    surfaced as data, and `contradicting.status` is "deferred" rather than
+    faked -- the same discipline as refusing a "refuted" verdict.
+
+    This is provenance, NOT self-correction. It exposes everything a revision
+    would need to trace; it revises nothing. Belief revision is a later layer.
+
+    Never raises: an untraceable belief reports basis NONE.
+    """
+    observations: list[dict] = []
+    sources: list[str] = []
+    methods: list[str] = []
+    first_at = last_at = None
+
+    try:
+        rows = (await pg_session.execute(
+            text(_EVIDENCE_FOR_PAIR), {"a": subject, "b": obj})).fetchall()
+        for s, predicate, o, source, span, method, observed_at in rows:
+            observations.append({
+                "subject": s, "predicate": predicate, "object": o,
+                "source": source, "span": span, "method": method,
+                "observed_at": observed_at,
+            })
+            if source and source not in sources:
+                sources.append(source)
+            if method and method not in methods:
+                methods.append(method)
+            if first_at is None:
+                first_at = observed_at
+            last_at = observed_at
+    except Exception as exc:
+        logger.warning("Could not read evidence for %r/%r: %s", subject, obj, exc)
+
+    edge = None
+    try:
+        record = await (await neo4j_session.run(
+            _EDGE, a=subject, b=obj)).single()
+        if record and record.get("strength") is not None:
+            edge = {"strength": record["strength"], "g2": record.get("g2")}
+    except Exception as exc:
+        logger.debug("Could not read edge for %r/%r: %s", subject, obj, exc)
+
+    derivation = None
+    if not observations:
+        try:
+            row = (await pg_session.execute(
+                text(_INFERENCE), {"a": subject, "b": obj})).fetchall()
+            if row:
+                via, verdict = row[0]
+                derivation = {
+                    "premises": [via] if via else [],
+                    # The method is named, not a black box: a 2-hop associative
+                    # walk over co-occurrence edges. NOT proof -- S25 showed
+                    # these produce unsupported claims -- which is why the
+                    # verdict travels with it.
+                    "method": "2-hop associative inference (infer_links)",
+                    "verdict": verdict,
+                }
+        except Exception as exc:
+            logger.debug("Could not read inference for %r/%r: %s",
+                         subject, obj, exc)
+
+    dependents: list[dict] = []
+    try:
+        for dep_subject, dep_object in (await pg_session.execute(
+                text(_DEPENDENTS), {"concept": obj})).fetchall():
+            dependents.append({"subject": dep_subject, "object": dep_object})
+    except Exception as exc:
+        logger.debug("Could not read dependents for %r: %s", obj, exc)
+
+    if observations:
+        basis = OBSERVED
+    elif derivation:
+        basis = INFERRED
+    else:
+        basis = NONE
+
+    predicates = sorted({o["predicate"] for o in observations})
+    return {
+        "what": {"subject": subject, "predicates": predicates, "object": obj},
+        "why": {"basis": basis, "edge": edge},
+        "where": sources,
+        "how": methods,
+        "when": {"first": first_at, "last": last_at},
+        "supporting": observations,
+        "contradicting": {"status": "deferred",
+                          "competingPredicates": predicates if len(predicates) > 1 else []},
+        "derivation": derivation,
+        "dependents": dependents,
+    }

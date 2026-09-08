@@ -4,7 +4,63 @@ Running log so a new session resumes without re-deriving context. Newest entry f
 
 ---
 
-## 2026-09-08 (session 26) -- A world-model roadmap arrives. The fork it forces, and the first brick.
+## 2026-09-08 (session 26) -- A world-model roadmap arrives. The fork, the ruling, and the provenance substrate.
+
+**Status:** provenance substrate built, tested, crawler wired (328 tests).
+Human ruled the fork: build provenance now, road A (induce later, never
+hardcode), predicate-agnostic.
+
+### Update after the ruling (same session)
+
+Sanju ruled the layer-1 fork below: **build the provenance substrate now while
+the corpus keeps accumulating for relation induction; do not hardcode the
+relation ontology.** Also insisted, correctly: **provenance is NOT
+self-correction** -- it is the prerequisite that makes revision possible, and
+the roadmap stays honest only if that line is kept. Nothing here revises a
+belief; `brain_provenance` has no `revise`/`correct` and a test enforces it.
+
+Built on top of the read-only `explain()` from earlier this session:
+
+- **`brain_claim_evidence`** (new table, raw SQL, not models.py). One row per
+  observation: subject, **predicate (verbatim, never typed)**, object, source,
+  span, method, observed_at. This keeps what `brain_relations` folded away -- 
+  WHERE a claim was read, its exact SPAN, and HOW it was extracted. Keyed on
+  (subject, predicate, object, source) so re-reading the same source refreshes
+  rather than duplicates.
+- **`record_evidence`** -- writer; drops any observation with no source
+  (evidence without provenance is not evidence); never raises on the hot path.
+- **`trace(subject, object)`** -- answers Sanju's nine questions without
+  collapsing them into one number: what / why / where / how / when / supporting
+  / contradicting / derivation / dependents. `derivation` names its method
+  ("2-hop associative inference") and carries the S25 verdict, so a conclusion
+  shows its premises and how well they held. `dependents` = claims reasoned
+  THROUGH this one (hypotheses whose `via` is this concept).
+- **Crawler wired**: `_read_adaptively` now also returns the (subject,
+  predicate, object, sentence) evidence for each triple -- captured during the
+  parse it already does, so no second pass -- and the crawler records it with
+  the page URL and the extractor name as `method`. The evidence table is
+  created at startup beside the others.
+
+**contradicting is DEFERRED, not faked.** Two observations contradict only if
+their predicates are opposites, and detecting opposition needs predicate
+polarity the project cannot yet induce (vectors place antonyms together -- a
+measured failure, sessions 20-21). So competing predicates are surfaced as raw
+data and `contradicting.status = "deferred"`. Same discipline as refusing a
+"refuted" verdict: never assert opposition the evidence cannot support. This is
+the one place the substrate visibly waits on the corpus.
+
+Predicate-agnostic throughout: the substrate is (subject, predicate, object)
+and does not change shape the day relation induction succeeds -- exactly what
+Sanju required so the infrastructure outlives the ontology question.
+
+### Not yet done (next)
+- `trace()` is a library; the /ask answer path still emits the flat `sources`
+  list. Wiring it in is the natural first consumer.
+- The evidence table fills only going FORWARD. Historic brain_relations rows
+  have no span/source and are not backfillable (the spans are gone).
+- Belief revision (real self-correction) remains unbuilt, by design.
+
+--- ORIGINAL SESSION-26 ENTRY (pre-ruling) BELOW ---
 
 **Status:** provenance layer built and tested (319 tests). Roadmap assessed;
 one architectural fork raised for the human, not decided here.

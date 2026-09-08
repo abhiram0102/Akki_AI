@@ -116,7 +116,7 @@ class TestAdaptiveReading:
         """The Wikipedia shape: rich opening, then references and see-also,
         which cost NLP time and yield nothing."""
         extract = self._extract_from({0: 5, 1: 4, 2: 3, 3: 0, 4: 0, 5: 0})
-        pairs, read, _ctx = brain_crawler._read_adaptively(self._page(600), extract)
+        pairs, read, _ctx, _ev = brain_crawler._read_adaptively(self._page(600), extract)
         assert read < 600, "read the whole page including the dead tail"
         assert read >= brain_crawler._MIN_READ
 
@@ -124,7 +124,7 @@ class TestAdaptiveReading:
         """The essay shape. This is the case a fixed cap gets wrong: the page
         is at its most productive exactly where the old cap stopped."""
         extract = self._extract_from({0: 2, 1: 2, 2: 4, 3: 5, 4: 2, 5: 0})
-        pairs, read, _ctx = brain_crawler._read_adaptively(self._page(600), extract)
+        pairs, read, _ctx, _ev = brain_crawler._read_adaptively(self._page(600), extract)
         assert read > 200, (
             f"stopped at {read} sentences, discarding the most productive part "
             "of the page"
@@ -135,14 +135,14 @@ class TestAdaptiveReading:
         """A page whose first block happens to be thin must not be abandoned
         on that evidence -- which is what `_MIN_READ` protects against."""
         extract = self._extract_from({0: 0, 1: 3, 2: 4, 3: 4})
-        pairs, read, _ctx = brain_crawler._read_adaptively(self._page(400), extract)
+        pairs, read, _ctx, _ev = brain_crawler._read_adaptively(self._page(400), extract)
         assert read >= brain_crawler._MIN_READ
         assert pairs, "abandoned a productive page because it opened quietly"
 
     def test_a_page_that_never_stops_producing_is_still_bounded(self):
         """One page cannot be allowed to consume the whole crawl."""
         extract = self._extract_from({i: 5 for i in range(40)})
-        _, read, _ctx = brain_crawler._read_adaptively(self._page(4000), extract)
+        _, read, _ctx, _ev = brain_crawler._read_adaptively(self._page(4000), extract)
         assert read <= brain_crawler._MAX_READ
 
     def test_an_extraction_failure_does_not_abort_the_page(self):
@@ -151,7 +151,7 @@ class TestAdaptiveReading:
             if sentence.endswith("7"):
                 raise ValueError("unparseable")
             return [("a", "verb", "b")]
-        pairs, read, _ctx = brain_crawler._read_adaptively(self._page(300), extract)
+        pairs, read, _ctx, _ev = brain_crawler._read_adaptively(self._page(300), extract)
         assert read == 300
         assert len(pairs) == 300 - 30  # every sentence ending in 7
 
@@ -207,7 +207,7 @@ def test_an_unproductive_page_now_stops_before_the_old_cap():
         return [("a", "verb", "b")] * (4 if index < 50 else 0)
 
     sentences = [f"sentence number {i}" for i in range(600)]
-    _, read, _ctx = brain_crawler._read_adaptively(sentences, extract)
+    _, read, _ctx, _ev = brain_crawler._read_adaptively(sentences, extract)
     assert read < 200, (
         f"read {read} sentences of a page that stopped producing after 50; "
         "the old fixed cap would have read 200"
@@ -474,7 +474,7 @@ class TestTheCrawlerFeedsTheMeaningLayer:
             w = s.split()
             return [(w[0], w[0], w[-1])]
 
-        _triples, _read, contexts = brain_crawler._read_adaptively(sentences, extract)
+        _triples, _read, contexts, _ev = brain_crawler._read_adaptively(sentences, extract)
 
         assert contexts["fire"] == ["fire causes heat"]
         assert "heat causes expansion" in contexts["heat"]
@@ -488,7 +488,7 @@ class TestTheCrawlerFeedsTheMeaningLayer:
             w = s.split()
             return [(w[0], w[1], w[-1])]
 
-        _t, _r, contexts = brain_crawler._read_adaptively(sentences, extract)
+        _t, _r, contexts, _ev = brain_crawler._read_adaptively(sentences, extract)
 
         assert len(contexts["fire"]) == 2
 

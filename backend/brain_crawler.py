@@ -24,6 +24,7 @@ from backend.services import brain_learn
 from backend.services import brain_curiosity
 from backend.services import brain_meaning
 from backend.services import brain_hypothesis
+from backend.services import brain_provenance
 from backend.services import brain_relations
 from backend.services.neo4j_service import get_driver, ensure_schema
 from backend.services.brain_fetchers import (
@@ -119,22 +120,23 @@ _MAX_READ = int(os.getenv("BRAIN_READ_MAX", "1200"))
 _YIELD_SHARE = float(os.getenv("BRAIN_READ_SHARE", "0.2"))
 
 
-def _read_adaptively(sentences: list[str], extract) -> tuple[list, int, dict]:
+def _read_adaptively(sentences: list[str], extract) -> tuple[list, int, dict, list]:
     """Parse blocks of sentences while the page is still producing relations.
 
-    Returns the pairs found, how many sentences were actually read so the
-    caller can record what the page cost as well as what it gave, and the
-    SENTENCE each concept was found in.
+    Returns the triples found; how many sentences were actually read so the
+    caller can record what the page cost as well as what it gave; the SENTENCE
+    each concept was found in (for the meaning layer's sense clustering); and
+    the (subject, predicate, object, sentence) EVIDENCE for each triple.
 
-    That third value is what the meaning layer clusters into word senses, and
-    the crawler was not collecting it -- `record_contexts` was reachable only
-    from the learn-on-demand path, so sense discovery saw a handful of
-    `/ask` misses and none of the 40,000 pages the crawler had read. It is
-    gathered here rather than by re-walking the sentences afterwards, because
-    parsing is the bottleneck and the mapping is free at this point.
+    The last two are gathered here, during the parse the crawler already does,
+    rather than by re-walking the sentences -- parsing is the bottleneck and a
+    second pass would halve the crawl. The evidence span is exactly the
+    provenance the substrate needs: it is the one place the source sentence for
+    a triple still exists before it is folded into a bare count.
     """
-    pairs: list = []
+    triples: list = []
     contexts: dict[str, list[str]] = {}
+    evidence: list = []
     best = 0.0
     read = 0
     for start in range(0, min(len(sentences), _MAX_READ), _BLOCK):
@@ -148,17 +150,18 @@ def _read_adaptively(sentences: list[str], extract) -> tuple[list, int, dict]:
             except Exception:
                 continue
             found.extend(extracted)
-            for subject, _verb, obj in extracted:
+            for subject, predicate, obj in extracted:
                 contexts.setdefault(subject, []).append(sentence)
                 contexts.setdefault(obj, []).append(sentence)
-        pairs.extend(found)
+                evidence.append((subject, predicate, obj, sentence))
+        triples.extend(found)
         read += len(block)
 
         yield_rate = len(found) / len(block)
         best = max(best, yield_rate)
         if read >= _MIN_READ and yield_rate < best * _YIELD_SHARE:
             break
-    return pairs, read, contexts
+    return triples, read, contexts, evidence
 
 
 def _record_page_contexts(contexts: dict) -> None:
@@ -233,7 +236,7 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
     # The verb is kept alongside the pair: the graph is unchanged, and the
     # observation log gains what the graph throws away. One parse either way --
     # parsing is the bottleneck, so nothing is read twice.
-    triples, sentences_read, contexts = _read_adaptively(sentences, extract_relations)
+    triples, sentences_read, contexts, evidence = _read_adaptively(sentences, extract_relations)
     _record_page_contexts(contexts)
     pairs = [(subject, obj) for subject, _, obj in triples]
 
@@ -260,6 +263,16 @@ async def crawl_one_page(entry: dict, client, robots: RobotsChecker, limiter: Ra
             logger.debug("Could not adjudicate claims about %r: %s", concept, exc)
 
     await brain_relations.record(pg_session, triples)
+
+    # The provenance substrate: keep WHERE each observation came from, its exact
+    # span, and HOW it was extracted -- the things brain_relations folds away
+    # into a bare count. `method` names the extractor so a future change to it
+    # is traceable in the evidence rather than silent. Predicate stays verbatim.
+    await brain_provenance.record_evidence(pg_session, [
+        {"subject": s, "predicate": p, "object": o,
+         "source": url, "span": span, "method": "dep-parse(extract_relations)"}
+        for s, p, o, span in evidence
+    ])
 
     await pg_session.execute(
         pg_insert(BrainVisitedPage).values(
@@ -479,6 +492,7 @@ async def main() -> None:
         async with AsyncSessionLocal() as pg_session:
             await ensure_frontier_index(pg_session)
             await brain_hypothesis.ensure_schema(pg_session)
+            await brain_provenance.ensure_evidence_schema(pg_session)
 
             # Seed the frontier if empty
             result = await pg_session.execute(select(BrainFrontier).limit(1))
