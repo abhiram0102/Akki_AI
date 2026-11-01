@@ -1,0 +1,12 @@
+# Local dev override (auto-merged by docker compose).
+# Added for the brain learn-on-demand feature build so backend code edits are
+# live in the container (no image rebuild per change) and pytest can run
+# in-container against the mounted source. Does not alter the committed
+# docker-compose.yml. Safe to delete for a pure production run.
+services:
+  backend:
+    volumes:
+      - ./backend:/app/backend
+  brain-crawler:
+    volumes:
+      - ./backend:/app/backend

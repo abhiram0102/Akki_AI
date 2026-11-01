@@ -1,20 +1,56 @@
-node_modules
-dist
-.DS_Store
-server/public
-vite.config.ts.*
-*.tar.gz
-node_modules
-.worktrees/
-
-# Local meaning store (ChromaDB): derived data, rebuilt by reading.
-data/brain_meaning/
-
-# Python bytecode
-__pycache__/
-*.pyc
-
-# Local secrets - never commit
+# Environment files and secrets
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!backend/.env.example
+
+# Python environments and cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Local configuration
+.local/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated evaluation results
+backend/eval/results/
+
+# Build artifacts
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local backups
+*.backup
+.gitignore.backup-before-github
+roster-backups/
+# Generated ChromaDB data
+data/brain_meaning/
+# Generated brain artifacts
+brain/*.pkl
+brain/brain_log.txt
+brain/result_love.json
+brain/results_love.json
+brain/tree_love.html
+brain/tree_love.json
+# Local agent configuration
+roster.json
+
+# Obsidian local workspace settings
+akkii/.obsidian/
+
+# Hive private runtime state
+hive/log.jsonl
+hive/fleet.json
+hive/registry.json
+hive/tasks.json
+hive/agents/god/cursor.json
+hive/agents/god/identity.md
+hive/agents/god/memory.md
+hive/agents/god/settings.json

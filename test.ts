@@ -1,0 +1,1 @@
+const test = "border border-input/30 bg-background/70 backdrop-blur-lg text-muted-foreground hover:bg-muted/60";
