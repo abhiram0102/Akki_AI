@@ -18,13 +18,13 @@
 
 AKKI is not an AI assistant. It is not a chatbot. It is not a tool you open when you need something.
 
-It is a **companion** — one that works while you sleep, learns without being taught, and reaches out to you when it has something to say.
+It is a **companion** - one that works while you sleep, learns without being taught, and reaches out to you when it has something to say.
 
 AKKI combines three interconnected systems into one platform:
 
-1. **The Brain Engine** — A self-learning knowledge system that reads the internet autonomously, builds an emergent ontology, and discovers hidden connections through convergence
-2. **The Cybersecurity Platform** — Red teaming, OSINT, SIGMA rule analysis, code auditing, report generation, and workflow automation
-3. **The Companion Layer** — Emotional bonding, voice interaction, personalized memory, and genuine autonomous presence
+1. **The Brain Engine** - A self-learning knowledge system that reads the internet autonomously, builds an emergent ontology, and discovers hidden connections through convergence
+2. **The Cybersecurity Platform** - Red teaming, OSINT, SIGMA rule analysis, code auditing, report generation, and workflow automation
+3. **The Companion Layer** - Emotional bonding, voice interaction, personalized memory, and genuine autonomous presence
 
 ---
 
